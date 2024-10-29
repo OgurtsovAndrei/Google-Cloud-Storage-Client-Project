@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 )
 
 func CreateRandomFile(fileName string, sizeMB int) error {
@@ -80,18 +79,4 @@ func createTmpDirectory(tmpDir string) {
 			log.Fatalf("failed to create tmp directory: %v", err)
 		}
 	}
-}
-
-func createFiles(tmpDir string, sizeMB, numFiles int) []string {
-	filePaths := make([]string, numFiles)
-	for i := 1; i <= numFiles; i++ {
-		fileName := fmt.Sprintf("file_%d", i)
-		filePath := filepath.Join(tmpDir, fileName)
-		filePaths[i-1] = filePath
-
-		if err := CreateRandomFile(filePath, sizeMB); err != nil {
-			log.Fatalf("Error creating file %s: %v", filePath, err)
-		}
-	}
-	return filePaths
 }
