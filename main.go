@@ -10,9 +10,9 @@ import (
 
 func main() {
 	bucket := "my-awesome-fs-project-bucket-hard-delete"
-	sizeMB := 32
+	sizeMB := 64
 	numFiles := 100
-	numThreads := 2
+	numThreads := 1
 	results := [][]string{{"File Name", "Upload Time (seconds)"}}
 	tmpDir := "./tmp"
 
