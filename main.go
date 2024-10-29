@@ -10,9 +10,9 @@ import (
 
 func main() {
 	bucket := "my-awesome-fs-project-bucket-hard-delete"
-	sizeMB := 32
+	sizeMB := 128
 	numFiles := 100
-	numThreads := 2
+	numThreads := 1
 	results := [][]string{{"File Name", "Upload Time (seconds)"}}
 	tmpDir := "./tmp"
 
@@ -40,7 +40,7 @@ func uploadFilesConcurrently(bucket string, tmpDir string, sizeMB, numFiles, num
 		go func() {
 			defer wg.Done()
 			for fileIndex := range uploadCh {
-				fileName := fmt.Sprintf("file_%d", fileIndex)
+				fileName := fmt.Sprintf("file-u_%d", fileIndex)
 				filePath := filepath.Join(tmpDir, fileName)
 
 				if err := CreateRandomFile(filePath, sizeMB); err != nil {
