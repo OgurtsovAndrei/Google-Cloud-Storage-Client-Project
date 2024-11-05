@@ -8,7 +8,10 @@ import logging as log
 # Load data
 file_size_mb = 64  # File size in MB (as used in the Go code)
 numThreads = 1  # File size in MB (as used in the Go code)
-df = pd.read_csv(f"upload_times_{file_size_mb}MB_{numThreads}Thr.csv")
+dir_local_eu = "Local-EU"
+dir_eu_eu = "EU-EU"
+dir_us_eu = "US-EU"
+df = pd.read_csv(f"data/{dir_us_eu}/upload_times_{file_size_mb}MB_{numThreads}Thr.csv")
 
 # Add upload speed column
 df["Upload Speed (MB/s)"] = file_size_mb / df["Upload Time (seconds)"]

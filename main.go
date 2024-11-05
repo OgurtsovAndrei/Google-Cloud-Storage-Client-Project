@@ -16,6 +16,11 @@ func main() {
 	results := [][]string{{"File Name", "Upload Time (seconds)"}}
 	tmpDir := "./tmp"
 
+	//dir_local_eu := "Local-EU"
+	//dir_eu_eu := "EU-EU"
+	dir_us_eu := "US-EU"
+	data_dir := fmt.Sprintf("data/%s", dir_us_eu)
+
 	// Create tmp directory if it doesn't exist
 	createTmpDirectory(tmpDir)
 
@@ -25,7 +30,7 @@ func main() {
 	uploadFilesConcurrently(bucket, tmpDir, sizeMB, numFiles, numThreads, &results)
 
 	// Step 2: Save or update results to CSV
-	csvFileName := fmt.Sprintf("upload_times_%dMB_%dThr.csv", sizeMB, numThreads)
+	csvFileName := fmt.Sprintf("%s/upload_times_%dMB_%dThr.csv", data_dir, sizeMB, numThreads)
 	appendToCSV(csvFileName, results)
 	fmt.Printf("Upload times saved to %s\n", csvFileName)
 }
