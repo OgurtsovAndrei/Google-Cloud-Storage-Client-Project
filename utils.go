@@ -3,10 +3,28 @@ package main
 import (
 	"crypto/rand"
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 )
+
+func makeRandBuf(len int) []byte {
+	buf := make([]byte, len)
+	n, err := rand.Read(buf)
+	if err != nil || n != len {
+		panic("failed to make a random buffer")
+	}
+	return buf
+}
+
+func saveJson(x any) []byte {
+	b, err := json.Marshal(x)
+	if err != nil {
+		panic("json.Marshal() failed")
+	}
+	return b
+}
 
 func CreateRandomFile(fileName string, sizeMB int) error {
 	file, err := os.Create(fileName)

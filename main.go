@@ -1,163 +1,197 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
-	"sync"
+	"time"
 )
 
+var (
+	bucket      = "another-eu-1-reg-bucket-finland"
+	sizeMB      = 512 // Size of each file in MB
+	numFiles    = 3   // Number of files
+	numThreads  = 1   // Number of threads
+	chunkSizeMB = 16  // Chunk size in MB
+	tmpDir      = "./tmp"
+	dataDir     = "data/Local-EU"
+	chunkSize   = int64(chunkSizeMB * 1024 * 1024) // Chunk size in bytes
+)
+
+type UploadResult struct {
+	FileName    string    `json:"file_name"`
+	FileSizeMB  int       `json:"file_size_mb"`
+	ChunkSizeMB int       `json:"chunk_size_mb"`
+	UploadTime  float64   `json:"upload_time_seconds"`
+	ChunkSpeeds []float64 `json:"chunk_speeds_mb_per_s"`
+	TimePeriods []float64 `json:"time_periods_seconds"`
+}
+
 func main() {
-	bucket := "another-eu-1-reg-bucket-finland"
-	sizeGB := 1     // Размер файла в ГБ
-	numFiles := 1   // Количество файлов
-	numThreads := 1 // Количество потоков
-	chunkSizeMB := 16
-	chunkSize := int64(chunkSizeMB * 1024 * 1024) // Размер чанка (8 МБ)
-	results := [][]string{{"File Name", "Upload Time (seconds)", "Chunk Speeds (MB/s)"}}
-	tmpDir := "./tmp"
-
-	dirLocalEu := "Local-EU"
-	//dir_eu_eu := "EU-EU"
-	//dir_us_eu := "US-EU"
-	dataDir := fmt.Sprintf("data/%s", dirLocalEu)
-
-	// Создаём временную директорию, если она не существует
 	createTmpDirectory(tmpDir)
 
-	log.Println("Start uploading large files in chunks...")
+	var results []UploadResult
 
-	// Шаг 1: Загрузка файлов большего размера по чанкам с использованием горутин
-	uploadFilesChunkedConcurrently(bucket, tmpDir, sizeGB, numFiles, numThreads, chunkSize, &results)
+	for i := 0; i < numFiles; i++ {
+		fileName := fmt.Sprintf("tmpfile_%d.dat", i+1)
+		filePath := filepath.Join(tmpDir, fileName)
 
-	// Шаг 2: Сохраняем или обновляем результаты в CSV
-	csvFileName := fmt.Sprintf("%s/chunked_upload_times_%dGB_%dMB_ChSize_%dThr.csv", dataDir, sizeGB, chunkSizeMB, numThreads)
-	appendToCSV(csvFileName, results)
-	fmt.Printf("Upload times saved to %s\n", csvFileName)
+		err := CreateRandomFile(filePath, sizeMB) // sizeMB in MB
+		if err != nil {
+			log.Fatalf("Failed to create random file: %v", err)
+		}
+		defer os.Remove(filePath)
+
+		result, err := uploadFileChunked(filePath, bucket)
+		if err != nil {
+			fmt.Printf("Failed to upload file chunked: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("File uploaded successfully!")
+
+		results = append(results, result)
+	}
+
+	jsonFileName := fmt.Sprintf("%s/chunked_upload_results.json", dataDir)
+	err := appendToJSON(jsonFileName, results)
+	if err != nil {
+		log.Fatalf("Failed to write results to JSON file: %v", err)
+	}
+	fmt.Printf("Upload results saved to %s\n", jsonFileName)
 }
 
-func mainBasic() {
-	bucket := "my-awesome-fs-project-bucket-hard-delete"
-	sizeMB := 128
-	numFiles := 100
-	numThreads := 1
-	results := [][]string{{"File Name", "Upload Time (seconds)"}}
-	tmpDir := "./tmp"
+func uploadFileChunked(filePath, bucket string) (UploadResult, error) {
+	ctx := context.Background()
 
-	//dir_local_eu := "Local-EU"
-	//dir_eu_eu := "EU-EU"
-	dir_us_eu := "US-EU"
-	data_dir := fmt.Sprintf("data/%s", dir_us_eu)
+	if bucket == "" {
+		return UploadResult{}, fmt.Errorf("destination bucket must be specified")
+	}
 
-	// Create tmp directory if it doesn't exist
-	createTmpDirectory(tmpDir)
+	c, err := NewGcsClient(ctx)
+	if err != nil {
+		return UploadResult{}, err
+	}
 
-	log.Println("Start uploading files...")
+	// Open the file to be uploaded
+	file, err := os.Open(filePath)
+	if err != nil {
+		return UploadResult{}, fmt.Errorf("failed to open file: %w", err)
+	}
+	defer file.Close()
 
-	// Step 1: Upload files concurrently using specified number of Goroutines, creating files as needed
-	uploadFilesConcurrently(bucket, tmpDir, sizeMB, numFiles, numThreads, &results)
+	// Initiate a resumable upload session
+	uploadUrl, err := c.NewUploadSession(ctx, bucket, filepath.Base(filePath))
+	if err != nil {
+		return UploadResult{}, fmt.Errorf("failed to start upload session: %w", err)
+	}
 
-	// Step 2: Save or update results to CSV
-	csvFileName := fmt.Sprintf("%s/upload_times_%dMB_%dThr.csv", data_dir, sizeMB, numThreads)
-	appendToCSV(csvFileName, results)
-	fmt.Printf("Upload times saved to %s\n", csvFileName)
+	buffer := make([]byte, chunkSize)
+	offset := int64(0)
+	last := false
+	var chunkSpeeds []float64
+	var timePeriods []float64
+	chunkCount := 0
+	start := time.Now()
+
+	fmt.Printf("Starting upload of file: %s\n", filePath)
+	fmt.Printf("Target bucket: %s\n", bucket)
+	fmt.Printf("Chunk size: %d bytes (%.2f MB)\n", chunkSize, float64(chunkSize)/(1024*1024))
+
+	for {
+		readStart := time.Now()
+		n, err := file.Read(buffer)
+		if err != nil && err != io.EOF {
+			return UploadResult{}, fmt.Errorf("failed to read chunk: %w", err)
+		}
+		if n == 0 {
+			break // No more data to read from the file
+		}
+
+		chunkCount++
+		fmt.Printf("Processing chunk #%d\n", chunkCount)
+		fmt.Printf("Read %d bytes from file\n", n)
+
+		writeStart := time.Now()
+		// Check if this is the last chunk
+		if n < int(chunkSize) {
+			last = true
+		}
+
+		// Upload the chunk
+		err = c.UploadObjectPart(ctx, uploadUrl, offset, buffer[:n], last)
+		if err != nil {
+			return UploadResult{}, fmt.Errorf("failed to upload chunk at offset %d: %w", offset, err)
+		}
+		writeDuration := time.Since(writeStart).Seconds()
+		timePeriods = append(timePeriods, writeDuration)
+		fmt.Printf("Chunk #%d written to bucket in %.2f seconds\n", chunkCount, writeDuration)
+
+		readDuration := time.Since(readStart).Seconds()
+		if readDuration < 0.05 {
+			fmt.Printf("Chunk #%d speed calculation skipped (too short read duration: %.2f seconds)\n", chunkCount, readDuration)
+			chunkSpeeds = append(chunkSpeeds, 0)
+			continue
+		}
+
+		chunkSpeed := float64(n) / readDuration / (1024 * 1024) // MB/s
+		fmt.Printf("Chunk #%d speed: %.2f MB/s (read duration: %.2f seconds)\n", chunkCount, chunkSpeed, readDuration)
+
+		chunkSpeeds = append(chunkSpeeds, chunkSpeed)
+
+		// Update offset
+		offset += int64(n)
+	}
+
+	totalDuration := time.Since(start).Seconds()
+	fmt.Printf("Upload complete for file: %s\n", filePath)
+	fmt.Printf("Total upload time: %.2f seconds\n", totalDuration)
+
+	return UploadResult{
+		FileName:    filepath.Base(filePath),
+		FileSizeMB:  sizeMB,
+		ChunkSizeMB: chunkSizeMB,
+		UploadTime:  totalDuration,
+		ChunkSpeeds: chunkSpeeds,
+		TimePeriods: timePeriods,
+	}, nil
 }
 
-func uploadFilesConcurrently(bucket string, tmpDir string, sizeMB, numFiles, numThreads int, results *[][]string) {
-	var wg sync.WaitGroup
-	uploadCh := make(chan int, numThreads) // Buffered channel to manage concurrent uploads
-	resultCh := make(chan []string, numFiles)
+func appendToJSON(fileName string, results []UploadResult) error {
+	var existingResults []UploadResult
 
-	for i := 0; i < numThreads; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for fileIndex := range uploadCh {
-				fileName := fmt.Sprintf("file-u_%d", fileIndex)
-				filePath := filepath.Join(tmpDir, fileName)
+	// Check if the JSON file already exists
+	if _, err := os.Stat(fileName); err == nil {
+		file, err := os.Open(fileName)
+		if err != nil {
+			return fmt.Errorf("failed to open JSON file for reading: %w", err)
+		}
+		defer file.Close()
 
-				if err := CreateRandomFile(filePath, sizeMB); err != nil {
-					log.Printf("Error creating file %s: %v", filePath, err)
-					continue
-				}
-
-				objectName := filepath.Base(filePath)
-				uploadDuration, err := uploadObject(bucket, objectName, filePath)
-				if err != nil {
-					log.Printf("upload failed for %s: %v", filePath, err)
-					os.Remove(filePath)
-					continue
-				}
-
-				fmt.Printf("Uploaded %s in %.2f seconds\n", objectName, uploadDuration.Seconds())
-				resultCh <- []string{objectName, fmt.Sprintf("%.2f", uploadDuration.Seconds())}
-
-				os.Remove(filePath)
-			}
-		}()
+		err = json.NewDecoder(file).Decode(&existingResults)
+		if err != nil {
+			return fmt.Errorf("failed to decode JSON file: %w", err)
+		}
 	}
 
-	// Add file indices to the upload channel
-	for i := 1; i <= numFiles; i++ {
-		uploadCh <- i
+	// Append new results
+	existingResults = append(existingResults, results...)
+
+	// Write updated data to the JSON file
+	file, err := os.Create(fileName)
+	if err != nil {
+		return fmt.Errorf("failed to create JSON file: %w", err)
 	}
-	close(uploadCh)
+	defer file.Close()
 
-	// Wait for all Goroutines to finish
-	wg.Wait()
-	close(resultCh)
-
-	// Collect results from the result channel
-	for result := range resultCh {
-		*results = append(*results, result)
-	}
-}
-
-func uploadFilesChunkedConcurrently(bucket string, tmpDir string, sizeGB, numFiles, numThreads int, chunkSize int64, results *[][]string) {
-	var wg sync.WaitGroup
-	uploadCh := make(chan int, numThreads) // Buffered channel for concurrent uploads
-	resultCh := make(chan []string, numFiles)
-
-	for i := 0; i < numThreads; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for fileIndex := range uploadCh {
-				fileName := fmt.Sprintf("file-chunked_%d", fileIndex)
-				filePath := filepath.Join(tmpDir, fileName)
-
-				if err := CreateRandomFile(filePath, sizeGB*1024); err != nil {
-					log.Printf("Error creating file %s: %v", filePath, err)
-					continue
-				}
-
-				objectName := filepath.Base(filePath)
-				uploadDuration, chunkSpeeds, err := uploadObjectInChunksWithSpeed(bucket, objectName, filePath, chunkSize)
-				if err != nil {
-					log.Printf("upload failed for %s: %v", filePath, err)
-					os.Remove(filePath)
-					continue
-				}
-
-				resultRow := []string{objectName, fmt.Sprintf("%.2f", uploadDuration.Seconds())}
-				resultRow = append(resultRow, chunkSpeeds...)
-				resultCh <- resultRow
-
-				os.Remove(filePath)
-			}
-		}()
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(existingResults); err != nil {
+		return fmt.Errorf("failed to write to JSON file: %w", err)
 	}
 
-	for i := 1; i <= numFiles; i++ {
-		uploadCh <- i
-	}
-	close(uploadCh)
-
-	wg.Wait()
-	close(resultCh)
-
-	for result := range resultCh {
-		*results = append(*results, result)
-	}
+	return nil
 }
