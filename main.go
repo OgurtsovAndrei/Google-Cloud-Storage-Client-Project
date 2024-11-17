@@ -32,6 +32,7 @@ type UploadResult struct {
 }
 
 func main() {
+	fmt.Printf("Running main() ...\n")
 	createTmpDirectory(tmpDir)
 
 	var results []UploadResult
