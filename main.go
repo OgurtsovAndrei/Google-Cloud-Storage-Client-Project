@@ -13,12 +13,12 @@ import (
 
 var (
 	bucket      = "another-eu-1-reg-bucket-finland"
-	sizeMB      = 128 // Size of each file in MB
-	numFiles    = 1   // Number of files
+	sizeMB      = 2 * 1024 // Size of each file in MB
+	numFiles    = 8   // Number of files
 	numThreads  = 1   // Number of threads
-	chunkSizeMB = 16  // Chunk size in MB
+	chunkSizeMB = 128  // Chunk size in MB
 	tmpDir      = "./tmp"
-	dataDir     = "data/onServ"
+	dataDir     = "data/onServer"
 	chunkSize   = int64(chunkSizeMB * 1024 * 1024) // Chunk size in bytes
 )
 
