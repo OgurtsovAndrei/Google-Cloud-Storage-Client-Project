@@ -47,11 +47,15 @@ func appendToCSV(filename string, data [][]string) {
 			log.Fatalf("failed to read CSV file: %v", err)
 		}
 
-		// Add new rows from data to existing records
-		for i := 1; i < len(data); i++ {
-			existingRecords = append(existingRecords, data[i])
+		// Validate headers
+		if len(existingRecords) > 0 && len(data) > 0 {
+			if !equalHeaders(existingRecords[0], data[0]) {
+				log.Fatalf("header mismatch: existing file headers differ from new data headers")
+			}
 		}
 
+		// Add new rows from data to existing records
+		existingRecords = append(existingRecords, data[1:]...)
 	} else {
 		// If file doesn't exist, use data as-is
 		existingRecords = data
@@ -66,11 +70,25 @@ func appendToCSV(filename string, data [][]string) {
 
 	writer := csv.NewWriter(file)
 	defer writer.Flush()
+
 	for _, record := range existingRecords {
 		if err := writer.Write(record); err != nil {
 			log.Fatalf("failed to write record to CSV: %v", err)
 		}
 	}
+}
+
+// Helper function to compare headers
+func equalHeaders(existingHeader, newHeader []string) bool {
+	if len(existingHeader) != len(newHeader) {
+		return false
+	}
+	for i := range existingHeader {
+		if existingHeader[i] != newHeader[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func createTmpDirectory(tmpDir string) {
