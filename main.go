@@ -13,12 +13,12 @@ import (
 
 var (
 	bucket      = "another-eu-1-reg-bucket-finland"
-	sizeMB      = 512 // Size of each file in MB
-	numFiles    = 3   // Number of files
+	sizeMB      = 128 // Size of each file in MB
+	numFiles    = 1   // Number of files
 	numThreads  = 1   // Number of threads
 	chunkSizeMB = 16  // Chunk size in MB
 	tmpDir      = "./tmp"
-	dataDir     = "data/Local-EU"
+	dataDir     = "data/onServ"
 	chunkSize   = int64(chunkSizeMB * 1024 * 1024) // Chunk size in bytes
 )
 
@@ -53,6 +53,7 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("File uploaded successfully!")
+		os.Remove(filePath)
 
 		results = append(results, result)
 	}
@@ -164,8 +165,15 @@ func uploadFileChunked(filePath, bucket string) (UploadResult, error) {
 func appendToJSON(fileName string, results []UploadResult) error {
 	var existingResults []UploadResult
 
+	// Ensure that the directory path exists
+	dir := filepath.Dir(fileName)
+	if err := os.MkdirAll(dir, os.ModePerm); err != nil {
+		return fmt.Errorf("failed to create directories for path %s: %w", dir, err)
+	}
+
 	// Check if the JSON file already exists
 	if _, err := os.Stat(fileName); err == nil {
+		// File exists, open it for reading
 		file, err := os.Open(fileName)
 		if err != nil {
 			return fmt.Errorf("failed to open JSON file for reading: %w", err)
@@ -176,6 +184,12 @@ func appendToJSON(fileName string, results []UploadResult) error {
 		if err != nil {
 			return fmt.Errorf("failed to decode JSON file: %w", err)
 		}
+	} else if os.IsNotExist(err) {
+		// File does not exist, initialize empty slice
+		existingResults = []UploadResult{}
+	} else {
+		// Some other error occurred while checking file
+		return fmt.Errorf("failed to stat JSON file: %w", err)
 	}
 
 	// Append new results
