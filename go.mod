@@ -4,6 +4,7 @@ go 1.23.2
 
 require (
 	cloud.google.com/go/storage v1.45.0
+	github.com/gammazero/deque v1.0.0
 	github.com/spf13/cobra v1.8.1
 	golang.org/x/oauth2 v0.23.0
 	google.golang.org/api v0.197.0
