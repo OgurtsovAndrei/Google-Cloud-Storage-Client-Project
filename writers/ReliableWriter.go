@@ -122,7 +122,7 @@ func (rw *ReliableWriterImpl) Complete(ctx context.Context) error {
 func (rw *ReliableWriterImpl) Abort(ctx context.Context) {
 	rw.unreliableWriter.Abort(ctx)
 	rw.isComplete = false
-	rw.data = *NewScatterGatherBuffer() // Clear the buffer
+	rw.data = *NewScatterGatherBuffer()
 	fmt.Println("Write operation aborted.")
 }
 
@@ -132,36 +132,8 @@ func (rw *ReliableWriterImpl) launchWriting(ctx context.Context) {
 		for {
 			select {
 			case <-rw.writeEventsChan:
-				rw.mutex.Lock()
-				isLast := rw.isComplete
-				rw.mutex.Unlock()
-
-				for !rw.data.IsEmpty() {
-					rw.mutex.Lock()
-					buf, err := rw.data.TakeBytes(rw.MaxChunkSize)
-					rw.mutex.Unlock()
-
-					if err != nil {
-						fmt.Println("Error taking bytes:", err)
-						break
-					}
-					rw.WakeUp()
-
-					chunkBegin := bytesWritten
-					chunkEnd := bytesWritten + int64(len(buf.ToBytes()))
-
-					written, err := rw.attemptWriteWithRetries(ctx, buf.ToBytes(), bytesWritten, chunkBegin, chunkEnd, isLast)
-					bytesWritten += written
-
-					if err != nil {
-						fmt.Println("Failed to write after retries:", err)
-						rw.Abort(ctx)
-					}
-
-					if isLast {
-						fmt.Println("Write complete. Writing goroutine shutting down.")
-						return
-					}
+				if rw.handleWriteEvents(bytesWritten, ctx) {
+					return
 				}
 
 			case <-ctx.Done():
@@ -170,6 +142,44 @@ func (rw *ReliableWriterImpl) launchWriting(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+func (rw *ReliableWriterImpl) handleWriteEvents(bytesWritten int64, ctx context.Context) bool {
+	rw.mutex.Lock()
+	isLast := rw.isComplete
+	rw.mutex.Unlock()
+
+	for !rw.data.IsEmpty() {
+		rw.mutex.Lock()
+		buf, err := rw.data.TakeBytes(rw.MaxChunkSize)
+		rw.mutex.Unlock()
+
+		if err != nil {
+			fmt.Println("Error taking bytes:", err)
+			break
+		}
+
+		if rw.data.size <= rw.MaxCacheSize/2 {
+			rw.WakeUp()
+		}
+
+		chunkBegin := bytesWritten
+		chunkEnd := bytesWritten + int64(len(buf.ToBytes()))
+
+		written, err := rw.attemptWriteWithRetries(ctx, buf.ToBytes(), bytesWritten, chunkBegin, chunkEnd, isLast)
+		bytesWritten += written
+
+		if err != nil {
+			fmt.Println("Failed to write after retries:", err)
+			rw.Abort(ctx)
+		}
+
+		if isLast {
+			fmt.Println("Write complete. Writing goroutine shutting down.")
+			return true
+		}
+	}
+	return false
 }
 
 func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf []byte, totalOffset int64, chunkBegin, chunkEnd int64, isLast bool) (int64, error) {
