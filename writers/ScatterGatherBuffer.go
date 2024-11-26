@@ -31,27 +31,23 @@ func (sgb *ScatterGatherBuffer) AddSCG(anotherSGB *ScatterGatherBuffer) {
 	}
 }
 
-func (sgb *ScatterGatherBuffer) TakeBytes(number uint32) (*ScatterGatherBuffer, error) {
-	if sgb.buffer.Len() == 0 {
-		return sgb, errors.New("buffer is empty")
-	}
-
-	if number > sgb.size {
-		return sgb, errors.New("buffer is not big enough")
+func (sgb *ScatterGatherBuffer) TakeBytes(minSize uint32, maxSize uint32) (*ScatterGatherBuffer, error) {
+	if minSize > sgb.size {
+		return nil, errors.New("buffer is not big enough")
 	}
 
 	resultSGB := NewScatterGatherBuffer()
 	var collected uint32
 
-	for collected < number && sgb.buffer.Len() > 0 {
+	for collected < maxSize && sgb.buffer.Len() > 0 {
 		front := sgb.buffer.PopFront()
 		frontLen := uint32(len(front))
-		if collected+frontLen <= number { // Take the entire chunk
+		if collected+frontLen <= maxSize { // Take the entire chunk
 			resultSGB.AddBytes(front)
 			collected += frontLen
 			sgb.size -= frontLen
 		} else { // Take only the necessary part of the chunk
-			remaining := number - collected
+			remaining := maxSize - collected
 			resultSGB.AddBytes(front[:remaining])
 			sgb.buffer.PushFront(front[remaining:])
 			collected += remaining
