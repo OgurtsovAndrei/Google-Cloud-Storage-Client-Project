@@ -3,6 +3,7 @@ package writers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/rand"
 	"os"
 	"sync"
@@ -24,7 +25,7 @@ type UnreliableLocalWriter struct {
 }
 
 func NewUnreliableLocalWriter(filePath string) (*UnreliableLocalWriter, error) {
-	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0644)
+	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return nil, err
 	}
@@ -36,18 +37,16 @@ func NewUnreliableLocalWriter(filePath string) (*UnreliableLocalWriter, error) {
 	}, nil
 }
 
-func (ulw *UnreliableLocalWriter) WriteAt(ctx context.Context, chunkBegin, chunkEnd int64, buf []byte, off int64, isLast bool) (int64, error) {
+func (ulw *UnreliableLocalWriter) WriteAt(_ context.Context, chunkBegin, chunkEnd int64, buf []byte, off int64, isLast bool) (int64, error) {
 	ulw.mu.Lock()
 	defer ulw.mu.Unlock()
 
-	if ulw.isAborted {
-		return 0, errors.New("operation aborted")
+	if off != ulw.resumeOff {
+		panic(fmt.Sprintf("WriteAt called on resumeOff %d, bud resumeOff is %d", off, ulw.resumeOff))
 	}
 
-	select {
-	case <-ctx.Done():
-		return 0, ctx.Err()
-	default:
+	if ulw.isAborted {
+		return 0, errors.New("operation aborted")
 	}
 
 	if chunkEnd-chunkBegin != int64(len(buf)) {
@@ -64,26 +63,22 @@ func (ulw *UnreliableLocalWriter) WriteAt(ctx context.Context, chunkBegin, chunk
 		}
 
 		if rand.Intn(100) == 42 {
+			ulw.resumeOff = off + totalWritten
 			return totalWritten, errors.New("Bad Luck")
 		}
 
 		// Simulate random delay for each batch
-		randomMs := rand.Intn(90) + 10
+		randomMs := rand.Intn(40) + 10
 		time.Sleep(time.Duration(randomMs) * time.Millisecond)
 
 		// Write the current batch
 		_, err := ulw.file.WriteAt(buf[start:end], off+totalWritten)
 		if err != nil {
+			ulw.resumeOff = off + totalWritten
 			return totalWritten, err
 		}
 
 		totalWritten += int64(end - start)
-
-		select {
-		case <-ctx.Done():
-			return totalWritten, ctx.Err()
-		default:
-		}
 	}
 
 	ulw.resumeOff = off + totalWritten
@@ -92,34 +87,26 @@ func (ulw *UnreliableLocalWriter) WriteAt(ctx context.Context, chunkBegin, chunk
 		ulw.file.Close()
 	}
 
+	if totalWritten != chunkEnd-chunkBegin {
+		panic("Writes have to be consistent")
+	}
+
 	return totalWritten, nil
 }
 
-func (ulw *UnreliableLocalWriter) GetResumeOffset(ctx context.Context) (int64, error) {
+func (ulw *UnreliableLocalWriter) GetResumeOffset(_ context.Context) (int64, error) {
 	ulw.mu.Lock()
 	defer ulw.mu.Unlock()
 
 	if ulw.isAborted {
 		return 0, errors.New("operation aborted")
 	}
-
-	select {
-	case <-ctx.Done():
-		return 0, ctx.Err()
-	default:
-	}
-
 	return ulw.resumeOff, nil
 }
 
-func (ulw *UnreliableLocalWriter) Abort(ctx context.Context) {
+func (ulw *UnreliableLocalWriter) Abort(_ context.Context) {
 	ulw.mu.Lock()
 	defer ulw.mu.Unlock()
-
-	select {
-	case <-ctx.Done(): // If context is canceled, we respect it but still abort the operation.
-	default:
-	}
 
 	ulw.isAborted = true
 	if ulw.file != nil {

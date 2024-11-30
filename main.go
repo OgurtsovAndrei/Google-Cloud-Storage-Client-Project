@@ -20,13 +20,15 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	rw := writers.NewReliableWriterImpl(ctx, unreliableWriter)
-	rw.MaxCacheSize = 64 * 1024 * 1024
-	rw.MaxChunkSize = 16 * 1024 * 1024
-	rw.MinChunkSize = 256 * 1024
+	config := writers.ReliableWriterConfig{
+		MaxCacheSize: 64 * 1024 * 1024,
+		MinChunkSize: 256 * 1024,
+		MaxChunkSize: 16 * 1024 * 1024,
+	}
 
+	rw := writers.NewReliableWriterImpl(ctx, unreliableWriter, config)
 	// Total size to write (1 GB)
-	var totalSize int64 = 1 * 1024 * 1024 * 1024
+	var totalSize int64 = 256 * 1024 * 1024
 
 	// Possible chunk sizes (powers of 2 from 1 KB to 128 MB)
 	chunkSizes := []int64{
@@ -70,6 +72,7 @@ func main() {
 		}
 
 		err := rw.WriteAt(ctx, data, written)
+
 		if err != nil {
 			fmt.Println("Error during writing:", err)
 			rw.Abort(ctx)
@@ -79,6 +82,7 @@ func main() {
 		written += chunkSize
 	}
 
+	fmt.Println("Calling Complete")
 	err = rw.Complete(ctx)
 	if err != nil {
 		fmt.Println("Error during completion:", err)
