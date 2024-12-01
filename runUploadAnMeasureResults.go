@@ -12,14 +12,12 @@ import (
 )
 
 var (
-	bucket      = "another-eu-1-reg-bucket-finland"
-	sizeMB      = 2 * 1024 // Size of each file in MB
-	numFiles    = 8        // Number of files
-	numThreads  = 1        // Number of threads
-	chunkSizeMB = 128      // Chunk size in MB
+	numFiles    = 8
+	numThreads  = 1
+	chunkSizeMB = 128
 	tmpDir      = "./tmp"
 	dataDir     = "data/onServer"
-	chunkSize   = int64(chunkSizeMB * 1024 * 1024) // Chunk size in bytes
+	chunkSize   = int64(chunkSizeMB * 1024 * 1024)
 )
 
 func runUploadAnMeasureResults() {

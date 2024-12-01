@@ -8,27 +8,36 @@ import (
 	"time"
 )
 
-func main() {
-	filePath := "1GB_output_file.dat"
+var (
+	bucket              = "another-eu-1-reg-bucket-finland"
+	sizeMB              = 256
+	totalSize           = int64(sizeMB * 1024 * 1024)
+	fileName            = "1GB_output_file.dat"
+	maxCacheSize uint32 = 64 * 1024 * 1024
+	minChunkSize uint32 = 256 * 1024
+	maxChunkSize uint32 = 16 * 1024 * 1024
+)
 
-	unreliableWriter, err := writers.NewUnreliableLocalWriter(filePath)
+func main() {
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	unreliableWriter, err := writers.NewUnreliableGCSWriter(ctx, bucket, fileName)
+	//unreliableWriter, err := writers.NewUnreliableLocalWriter(fileName)
+
 	if err != nil {
 		fmt.Println("Failed to create UnreliableLocalWriter:", err)
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-
 	config := writers.ReliableWriterConfig{
-		MaxCacheSize: 64 * 1024 * 1024,
-		MinChunkSize: 256 * 1024,
-		MaxChunkSize: 16 * 1024 * 1024,
+		MaxCacheSize: maxCacheSize,
+		MinChunkSize: minChunkSize,
+		MaxChunkSize: maxChunkSize,
 	}
 
 	rw := writers.NewReliableWriterImpl(ctx, unreliableWriter, config)
-	// Total size to write (1 GB)
-	var totalSize int64 = 256 * 1024 * 1024
 
 	// Possible chunk sizes (powers of 2 from 1 KB to 128 MB)
 	chunkSizes := []int64{
