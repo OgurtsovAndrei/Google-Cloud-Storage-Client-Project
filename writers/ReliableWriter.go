@@ -197,10 +197,10 @@ func (rw *ReliableWriterImpl) handleWriteEvents(ctx context.Context) (isFinished
 			rw.WakeUp()
 		}
 
-		chunkBegin := int64(0)
-		chunkEnd := int64(buf.size)
+		chunkBegin := int64(rw.offset)
+		chunkEnd := chunkBegin + int64(buf.size)
 
-		written, err := rw.attemptWriteWithRetries(ctx, buf.ToBytes(), int64(rw.offset), chunkBegin, chunkEnd, isLast)
+		written, err := rw.attemptWriteWithRetries(ctx, buf.ToBytes(), chunkBegin, chunkEnd, isLast)
 		if err != nil {
 			fmt.Println("Failed to write after retries:", err)
 			rw.Abort(ctx)
@@ -216,12 +216,12 @@ func (rw *ReliableWriterImpl) handleWriteEvents(ctx context.Context) (isFinished
 	return false, nil
 }
 
-func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf []byte, totalOffset int64, chunkBegin, chunkEnd int64, isLast bool) (int64, error) {
+func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf []byte, chunkBegin, chunkEnd int64, isLast bool) (int64, error) {
 	var totalWritten int64 = 0
 	remaining := buf
 
 	for attempt := 0; attempt < 3; attempt++ {
-		written, err := rw.unreliableWriter.WriteAt(ctx, chunkBegin+totalWritten, chunkEnd, remaining, totalOffset+totalWritten, isLast)
+		written, err := rw.unreliableWriter.WriteAt(ctx, chunkBegin+totalWritten, chunkEnd, remaining, isLast)
 		totalWritten += written
 
 		if err == nil {

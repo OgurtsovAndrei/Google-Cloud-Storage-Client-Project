@@ -10,8 +10,14 @@ import (
 	"time"
 )
 
+type Error struct {
+	Code  string
+	Msg   string
+	Cause error
+}
+
 type UnreliableWriter interface {
-	WriteAt(ctx context.Context, chunkBegin, chunkEnd int64, buf []byte, off int64, isLast bool) (int64, error)
+	WriteAt(ctx context.Context, chunkBegin, chunkEnd int64, buf []byte, isLast bool) (int64, error)
 	GetResumeOffset(ctx context.Context) (int64, error)
 	Abort(ctx context.Context)
 }
@@ -37,12 +43,12 @@ func NewUnreliableLocalWriter(filePath string) (*UnreliableLocalWriter, error) {
 	}, nil
 }
 
-func (ulw *UnreliableLocalWriter) WriteAt(_ context.Context, chunkBegin, chunkEnd int64, buf []byte, off int64, isLast bool) (int64, error) {
+func (ulw *UnreliableLocalWriter) WriteAt(_ context.Context, chunkBegin, chunkEnd int64, buf []byte, isLast bool) (int64, error) {
 	ulw.mu.Lock()
 	defer ulw.mu.Unlock()
 
-	if off != ulw.resumeOff {
-		panic(fmt.Sprintf("WriteAt called on resumeOff %d, bud resumeOff is %d", off, ulw.resumeOff))
+	if chunkBegin != ulw.resumeOff {
+		panic(fmt.Sprintf("WriteAt called on resumeOff %d, bud resumeOff is %d", chunkBegin, ulw.resumeOff))
 	}
 
 	if ulw.isAborted {
@@ -63,7 +69,7 @@ func (ulw *UnreliableLocalWriter) WriteAt(_ context.Context, chunkBegin, chunkEn
 		}
 
 		if rand.Intn(100) == 42 {
-			ulw.resumeOff = off + totalWritten
+			ulw.resumeOff = chunkBegin + totalWritten
 			return totalWritten, errors.New("Bad Luck")
 		}
 
@@ -72,23 +78,19 @@ func (ulw *UnreliableLocalWriter) WriteAt(_ context.Context, chunkBegin, chunkEn
 		time.Sleep(time.Duration(randomMs) * time.Millisecond)
 
 		// Write the current batch
-		_, err := ulw.file.WriteAt(buf[start:end], off+totalWritten)
+		_, err := ulw.file.WriteAt(buf[start:end], chunkBegin+totalWritten)
 		if err != nil {
-			ulw.resumeOff = off + totalWritten
+			ulw.resumeOff = chunkBegin + totalWritten
 			return totalWritten, err
 		}
 
 		totalWritten += int64(end - start)
 	}
 
-	ulw.resumeOff = off + totalWritten
+	ulw.resumeOff = chunkBegin + totalWritten
 
 	if isLast {
 		ulw.file.Close()
-	}
-
-	if totalWritten != chunkEnd-chunkBegin {
-		panic("Writes have to be consistent")
 	}
 
 	return totalWritten, nil
