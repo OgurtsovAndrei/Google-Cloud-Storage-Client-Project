@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand"
 	"os"
 	"time"
@@ -17,7 +18,7 @@ type Error struct {
 
 // UnreliableWriter Not thread safe, so all methods have to be called from same thread
 type UnreliableWriter interface {
-	WriteAt(ctx context.Context, chunkBegin, chunkEnd int64, buf []byte, isLast bool) (int64, error)
+	WriteAt(ctx context.Context, chunkBegin, chunkEnd int64, reader io.Reader, isLast bool) (int64, error)
 	GetResumeOffset(ctx context.Context) (int64, error)
 	Abort(ctx context.Context)
 }
@@ -42,26 +43,36 @@ func NewUnreliableLocalWriter(filePath string) (*UnreliableLocalWriter, error) {
 	}, nil
 }
 
-func (ulw *UnreliableLocalWriter) WriteAt(_ context.Context, chunkBegin, chunkEnd int64, buf []byte, isLast bool) (int64, error) {
+func (ulw *UnreliableLocalWriter) WriteAt(ctx context.Context, chunkBegin, chunkEnd int64, reader io.Reader, isLast bool) (int64, error) {
 	if chunkBegin != ulw.resumeOff {
-		panic(fmt.Sprintf("WriteAt called on resumeOff %d, bud resumeOff is %d", chunkBegin, ulw.resumeOff))
+		panic(fmt.Sprintf("WriteAt called on chunkBegin %d, but resumeOff is %d", chunkBegin, ulw.resumeOff))
 	}
 
 	if ulw.isAborted {
 		return 0, errors.New("operation aborted")
 	}
 
-	if chunkEnd-chunkBegin != int64(len(buf)) {
-		return 0, errors.New("buffer size does not match chunk range")
-	}
-
+	size := chunkEnd - chunkBegin
 	const batchSize = 4 * 1024 * 1024 // 4 MB
 	var totalWritten int64 = 0
+	buffer := make([]byte, batchSize)
 
-	for start := 0; start < len(buf); start += batchSize {
-		end := start + batchSize
-		if end > len(buf) {
-			end = len(buf) // Ensure the last batch doesn't exceed the buffer size
+	for totalWritten < size {
+		remaining := size - totalWritten
+		toRead := batchSize
+		if remaining < int64(toRead) {
+			toRead = int(remaining) // Adjust for the last partial batch
+		}
+
+		// Read the next batch from the reader
+		n, err := reader.Read(buffer[:toRead])
+		if err != nil && err != io.EOF {
+			ulw.resumeOff = chunkBegin + totalWritten
+			return totalWritten, fmt.Errorf("failed to read from reader: %w", err)
+		}
+
+		if n == 0 {
+			break // EOF or no more data to read
 		}
 
 		if rand.Intn(100) == 42 {
@@ -73,14 +84,13 @@ func (ulw *UnreliableLocalWriter) WriteAt(_ context.Context, chunkBegin, chunkEn
 		randomMs := rand.Intn(40) + 10
 		time.Sleep(time.Duration(randomMs) * time.Millisecond)
 
-		// Write the current batch
-		_, err := ulw.file.WriteAt(buf[start:end], chunkBegin+totalWritten)
+		_, err = ulw.file.WriteAt(buffer[:n], chunkBegin+totalWritten)
 		if err != nil {
 			ulw.resumeOff = chunkBegin + totalWritten
 			return totalWritten, err
 		}
 
-		totalWritten += int64(end - start)
+		totalWritten += int64(n)
 	}
 
 	ulw.resumeOff = chunkBegin + totalWritten
