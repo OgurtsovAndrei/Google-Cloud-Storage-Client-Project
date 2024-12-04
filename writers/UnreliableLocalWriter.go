@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
-	"sync"
 	"time"
 )
 
@@ -16,6 +15,7 @@ type Error struct {
 	Cause error
 }
 
+// UnreliableWriter Not thread safe, so all methods have to be called from same thread
 type UnreliableWriter interface {
 	WriteAt(ctx context.Context, chunkBegin, chunkEnd int64, buf []byte, isLast bool) (int64, error)
 	GetResumeOffset(ctx context.Context) (int64, error)
@@ -24,7 +24,6 @@ type UnreliableWriter interface {
 
 type UnreliableLocalWriter struct {
 	file      *os.File
-	mu        sync.Mutex
 	resumeOff int64
 	isAborted bool
 	filePath  string
@@ -44,9 +43,6 @@ func NewUnreliableLocalWriter(filePath string) (*UnreliableLocalWriter, error) {
 }
 
 func (ulw *UnreliableLocalWriter) WriteAt(_ context.Context, chunkBegin, chunkEnd int64, buf []byte, isLast bool) (int64, error) {
-	ulw.mu.Lock()
-	defer ulw.mu.Unlock()
-
 	if chunkBegin != ulw.resumeOff {
 		panic(fmt.Sprintf("WriteAt called on resumeOff %d, bud resumeOff is %d", chunkBegin, ulw.resumeOff))
 	}
@@ -97,9 +93,6 @@ func (ulw *UnreliableLocalWriter) WriteAt(_ context.Context, chunkBegin, chunkEn
 }
 
 func (ulw *UnreliableLocalWriter) GetResumeOffset(_ context.Context) (int64, error) {
-	ulw.mu.Lock()
-	defer ulw.mu.Unlock()
-
 	if ulw.isAborted {
 		return 0, errors.New("operation aborted")
 	}
@@ -107,9 +100,6 @@ func (ulw *UnreliableLocalWriter) GetResumeOffset(_ context.Context) (int64, err
 }
 
 func (ulw *UnreliableLocalWriter) Abort(_ context.Context) {
-	ulw.mu.Lock()
-	defer ulw.mu.Unlock()
-
 	ulw.isAborted = true
 	if ulw.file != nil {
 		ulw.file.Close()

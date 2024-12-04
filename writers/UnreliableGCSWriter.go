@@ -5,14 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 )
 
 type UnreliableGCSWriter struct {
 	gcsClient  *utils.GcsClient
 	uploadUrl  string
-	mu         sync.Mutex
 	resumeOff  int64
 	isAborted  bool
 	bucket     string
@@ -39,8 +37,6 @@ func NewUnreliableGCSWriter(ctx context.Context, bucket, objectName string) (*Un
 }
 
 func (ugw *UnreliableGCSWriter) WriteAt(ctx context.Context, chunkBegin, chunkEnd int64, buf []byte, isLast bool) (int64, error) {
-	ugw.mu.Lock()
-	defer ugw.mu.Unlock()
 
 	if ugw.isAborted {
 		return 0, errors.New("operation aborted")
@@ -71,9 +67,6 @@ func (ugw *UnreliableGCSWriter) WriteAt(ctx context.Context, chunkBegin, chunkEn
 }
 
 func (ugw *UnreliableGCSWriter) GetResumeOffset(ctx context.Context) (int64, error) {
-	ugw.mu.Lock()
-	defer ugw.mu.Unlock()
-
 	if ugw.isAborted {
 		return 0, errors.New("operation aborted")
 	}
@@ -90,9 +83,6 @@ func (ugw *UnreliableGCSWriter) GetResumeOffset(ctx context.Context) (int64, err
 }
 
 func (ugw *UnreliableGCSWriter) Abort(ctx context.Context) {
-	ugw.mu.Lock()
-	defer ugw.mu.Unlock()
-
 	ugw.isAborted = true
 	ugw.gcsClient.CancelUpload(ctx, ugw.uploadUrl)
 }

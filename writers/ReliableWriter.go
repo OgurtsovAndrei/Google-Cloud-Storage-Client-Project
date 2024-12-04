@@ -106,13 +106,21 @@ func (rw *ReliableWriterImpl) WriteAt(ctx context.Context, buf []byte, off int64
 }
 
 func (rw *ReliableWriterImpl) Complete(ctx context.Context) error {
-	if rw.isComplete {
+	rw.mutex.Lock()
+	isComplete := rw.isComplete
+	isAborted := rw.isAborted
+	if !isComplete && !isAborted {
+		rw.isComplete = true
+	}
+	rw.mutex.Unlock()
+
+	if isComplete {
 		return errors.New("already completed")
 	}
+	if isAborted {
+		return errors.New("was aborted")
+	}
 
-	rw.mutex.Lock()
-	rw.isComplete = true
-	rw.mutex.Unlock()
 	rw.notifyWriteEvent()
 	var err error
 	select {
@@ -137,10 +145,19 @@ func (rw *ReliableWriterImpl) Complete(ctx context.Context) error {
 
 func (rw *ReliableWriterImpl) Abort(ctx context.Context) {
 	rw.unreliableWriter.Abort(ctx)
+	rw.mutex.Lock()
 	rw.isComplete = false
 	rw.isAborted = true
+	rw.mutex.Unlock()
 	rw.data = NewScatterGatherBuffer()
 	rw.notifyWriteEvent() // To resume launch
+
+	var err error
+	select {
+	case <-ctx.Done():
+	case err = <-rw.resultChan:
+	}
+
 	fmt.Println("Write operation aborted.")
 }
 
