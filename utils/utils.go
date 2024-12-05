@@ -10,6 +10,20 @@ import (
 	"path/filepath"
 )
 
+type Error struct {
+	Code  string
+	Msg   string
+	Cause error
+}
+
+func (e *Error) Error() string {
+	return fmt.Sprintf("%s: %s", e.Code, e.Msg)
+}
+
+func (e *Error) Unwrap() error {
+	return e.Cause
+}
+
 type UploadResult struct {
 	FileName    string    `json:"file_name"`
 	FileSizeMB  int       `json:"file_size_mb"`

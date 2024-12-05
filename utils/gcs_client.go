@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -42,10 +43,8 @@ func NewGcsClient(ctx context.Context) (c *GcsClient, err error) {
 	return c, nil
 }
 
-func (c *GcsClient) UploadObject(ctx context.Context, bucket, name string, data []byte) (err error) {
-	req, err := http.NewRequestWithContext(ctx,
-		http.MethodPut, c.objectUrl(bucket, name),
-		bytes.NewReader(data))
+func (c *GcsClient) UploadObject(ctx context.Context, bucket, name string, reader io.Reader) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.objectUrl(bucket, name), reader)
 	if err != nil {
 		return err
 	}
@@ -93,36 +92,33 @@ func (c *GcsClient) NewUploadSession(ctx context.Context, bucket, name string) (
 	return uploadUrl, nil
 }
 
-func (c *GcsClient) UploadObjectPart(ctx context.Context, uploadUrl string, off int64, data []byte, last bool) (err error) {
-	req, err := http.NewRequestWithContext(ctx,
-		http.MethodPut, uploadUrl,
-		bytes.NewReader(data))
+func (c *GcsClient) UploadObjectPart(ctx context.Context, uploadUrl string, off int64, reader io.Reader, size int64, last bool) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadUrl, reader)
 	if err != nil {
 		return err
 	}
 
 	var contentRange string
 	if last {
-		if len(data) == 0 {
+		if size == 0 {
 			contentRange = fmt.Sprintf("bytes */%d", off)
 		} else {
-			begin, end := off, off+int64(len(data))
+			begin, end := off, off+size
 			contentRange = fmt.Sprintf("bytes %d-%d/%d", begin, end-1, end)
 		}
 	} else {
-		if len(data)%googleapi.MinUploadChunkSize != 0 {
-			return fmt.Errorf("unaligned chunk, size=%d", len(data))
+		if size%googleapi.MinUploadChunkSize != 0 {
+			return fmt.Errorf("unaligned chunk, size=%d", size)
 		}
-		if len(data) == 0 {
+		if size == 0 {
 			return fmt.Errorf("only the last chunk may be empty")
 		}
-
-		begin, end := off, off+int64(len(data))
+		begin, end := off, off+size
 		contentRange = fmt.Sprintf("bytes %d-%d/*", begin, end-1)
 	}
 
 	req.Header.Set("Content-Range", contentRange)
-	req.ContentLength = int64(len(data))
+	req.ContentLength = size
 	req.Header.Set("X-GUploader-No-308", "yes")
 
 	resp, err := c.h.Do(req)

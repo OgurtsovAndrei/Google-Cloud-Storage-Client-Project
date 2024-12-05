@@ -9,13 +9,14 @@ import (
 )
 
 var (
-	bucket              = "another-eu-1-reg-bucket-finland"
-	sizeMB              = 256
-	totalSize           = int64(sizeMB * 1024 * 1024)
-	fileName            = "1GB_output_file.dat"
-	maxCacheSize uint32 = 64 * 1024 * 1024
-	minChunkSize uint32 = 256 * 1024
-	maxChunkSize uint32 = 16 * 1024 * 1024
+	bucket               = "another-eu-1-reg-bucket-finland"
+	sizeMB               = 256
+	totalSize            = int64(sizeMB * 1024 * 1024)
+	fileName             = "1GB_output_file.dat"
+	maxCacheSize  uint32 = 64 * 1024 * 1024
+	minChunkSize  uint32 = 256 * 1024
+	maxChunkSize  uint32 = 16 * 1024 * 1024
+	listenAddress        = ":9000"
 )
 
 func main() {
@@ -23,11 +24,20 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	unreliableWriter, err := writers.NewUnreliableGCSWriter(ctx, bucket, fileName)
-	//unreliableWriter, err := writers.NewUnreliableLocalWriter(fileName)
+	go func() {
+		if err := startGCSProxyServer(ctx, listenAddress); err != nil {
+			fmt.Printf("Failed to start GCSProxyServer: %v\n", err)
+			cancel()
+		}
+	}()
 
+	time.Sleep(1 * time.Second)
+
+	//unreliableWriter, err := writers.NewUnreliableLocalWriter(fileName)
+	//unreliableWriter, err := writers.NewUnreliableGCSWriter(ctx, bucket, fileName)
+	unreliableWriter, err := writers.NewUnreliableProxyWriter("localhost"+listenAddress, bucket, fileName)
 	if err != nil {
-		fmt.Println("Failed to create UnreliableLocalWriter:", err)
+		fmt.Println("Failed to create UnreliableProxyWriter:", err)
 		return
 	}
 
@@ -61,7 +71,7 @@ func main() {
 		128 * 1024 * 1024, // 128 MB
 	}
 
-	rand.Seed(time.Now().UnixNano())
+	rnd := rand.New(rand.NewSource(42))
 
 	fmt.Println("Starting to write 1 GB file...")
 
@@ -69,7 +79,7 @@ func main() {
 		remaining := totalSize - written
 		var chunkSize int64
 
-		chunkSize = chunkSizes[rand.Intn(len(chunkSizes))]
+		chunkSize = chunkSizes[rnd.Intn(len(chunkSizes))]
 		if chunkSize > remaining {
 			chunkSize = remaining
 		}
@@ -77,7 +87,7 @@ func main() {
 		// Generate the chunk with random data
 		data := make([]byte, chunkSize)
 		for i := 0; i < len(data); i++ {
-			data[i] = byte(rand.Intn(256))
+			data[i] = byte(rnd.Intn(256))
 		}
 
 		err := rw.WriteAt(ctx, data, written)

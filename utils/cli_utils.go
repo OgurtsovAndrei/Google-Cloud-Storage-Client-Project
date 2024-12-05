@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -39,7 +40,7 @@ func runUploadObj(self *cobra.Command, args []string) (err error) {
 	}
 
 	buf := makeRandBuf(4096)
-	if err = c.UploadObject(ctx, uploadObjArgs.bucket, "x", buf); err != nil {
+	if err = c.UploadObject(ctx, uploadObjArgs.bucket, "x", bytes.NewReader(buf)); err != nil {
 		return err
 	}
 
@@ -80,7 +81,7 @@ func runUploadMultipartObj(self *cobra.Command, args []string) (err error) {
 	const chunkSize = 256 * 1024
 	off, buf := int64(0), makeRandBuf(2*chunkSize)
 
-	if err = c.UploadObjectPart(ctx, uploadUrl, off, buf[:chunkSize], false); err != nil {
+	if err = c.UploadObjectPart(ctx, uploadUrl, off, bytes.NewReader(buf[:chunkSize]), chunkSize, false); err != nil {
 		return err
 	}
 	off += chunkSize
@@ -92,7 +93,7 @@ func runUploadMultipartObj(self *cobra.Command, args []string) (err error) {
 	}
 	fmt.Printf("GetResumeOffset() = %d, %t\n", testOff, testLast)
 
-	if err = c.UploadObjectPart(ctx, uploadUrl, off, buf[:chunkSize], true); err != nil {
+	if err = c.UploadObjectPart(ctx, uploadUrl, off, bytes.NewReader(buf[:chunkSize]), chunkSize, true); err != nil {
 		return err
 	}
 
