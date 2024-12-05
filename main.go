@@ -71,7 +71,7 @@ func main() {
 		128 * 1024 * 1024, // 128 MB
 	}
 
-	rand.Seed(time.Now().UnixNano())
+	rnd := rand.New(rand.NewSource(42))
 
 	fmt.Println("Starting to write 1 GB file...")
 
@@ -79,7 +79,7 @@ func main() {
 		remaining := totalSize - written
 		var chunkSize int64
 
-		chunkSize = chunkSizes[rand.Intn(len(chunkSizes))]
+		chunkSize = chunkSizes[rnd.Intn(len(chunkSizes))]
 		if chunkSize > remaining {
 			chunkSize = remaining
 		}
@@ -87,7 +87,7 @@ func main() {
 		// Generate the chunk with random data
 		data := make([]byte, chunkSize)
 		for i := 0; i < len(data); i++ {
-			data[i] = byte(rand.Intn(256))
+			data[i] = byte(rnd.Intn(256))
 		}
 
 		err := rw.WriteAt(ctx, data, written)

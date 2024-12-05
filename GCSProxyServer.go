@@ -43,7 +43,7 @@ func startGCSProxyServer(ctx context.Context, listenAddress string) error {
 
 	go func() {
 		<-ctx.Done()
-		listener.Close()
+		_ = listener.Close()
 		fmt.Println("GCSProxyServer has been shut down.")
 	}()
 
@@ -146,7 +146,7 @@ func handleConnection(ctx context.Context, conn net.Conn, uploadSessions *map[st
 	session.activeConnections--
 	if session.activeConnections == 0 && (session.isAborted || session.isCompleted) {
 		session.cancelFunc()
-		session.gcsClient.CancelUpload(ctx, session.uploadUrl)
+		_ = session.gcsClient.CancelUpload(ctx, session.uploadUrl)
 		delete(*uploadSessions, sessionKey)
 	}
 	uploadSessionsMutex.Unlock()
