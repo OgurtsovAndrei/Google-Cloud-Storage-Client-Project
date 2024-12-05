@@ -9,13 +9,14 @@ import (
 )
 
 var (
-	bucket              = "another-eu-1-reg-bucket-finland"
-	sizeMB              = 256
-	totalSize           = int64(sizeMB * 1024 * 1024)
-	fileName            = "1GB_output_file.dat"
-	maxCacheSize uint32 = 64 * 1024 * 1024
-	minChunkSize uint32 = 256 * 1024
-	maxChunkSize uint32 = 16 * 1024 * 1024
+	bucket               = "another-eu-1-reg-bucket-finland"
+	sizeMB               = 256
+	totalSize            = int64(sizeMB * 1024 * 1024)
+	fileName             = "1GB_output_file.dat"
+	maxCacheSize  uint32 = 64 * 1024 * 1024
+	minChunkSize  uint32 = 256 * 1024
+	maxChunkSize  uint32 = 16 * 1024 * 1024
+	listenAddress        = ":9000"
 )
 
 func main() {
@@ -23,11 +24,20 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	unreliableWriter, err := writers.NewUnreliableGCSWriter(ctx, bucket, fileName)
-	//unreliableWriter, err := writers.NewUnreliableLocalWriter(fileName)
+	go func() {
+		if err := startGCSProxyServer(ctx, listenAddress); err != nil {
+			fmt.Printf("Failed to start GCSProxyServer: %v\n", err)
+			cancel()
+		}
+	}()
 
+	time.Sleep(1 * time.Second)
+
+	//unreliableWriter, err := writers.NewUnreliableLocalWriter(fileName)
+	//unreliableWriter, err := writers.NewUnreliableGCSWriter(ctx, bucket, fileName)
+	unreliableWriter, err := writers.NewUnreliableProxyWriter(ctx, "localhost"+listenAddress, bucket, fileName)
 	if err != nil {
-		fmt.Println("Failed to create UnreliableLocalWriter:", err)
+		fmt.Println("Failed to create UnreliableProxyWriter:", err)
 		return
 	}
 
