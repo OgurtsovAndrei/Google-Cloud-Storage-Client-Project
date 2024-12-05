@@ -14,16 +14,19 @@ import (
 )
 
 type UploadSession struct {
-	uploadUrl         string
-	gcsClient         *utils.GcsClient
-	resumeOffset      int64
-	isAborted         bool
-	isCompleted       bool
-	activeConnections int
-	bucketName        string
-	objectName        string
-	sessionCtx        context.Context
-	cancelFunc        context.CancelFunc
+	uploadUrl          string
+	gcsClient          *utils.GcsClient
+	resumeOffset       int64
+	isAborted          bool
+	isCompleted        bool
+	activeConnections  int
+	bucketName         string
+	objectName         string
+	sessionCtx         context.Context
+	cancelFunc         context.CancelFunc
+	totalBytesUploaded int64
+	uploadStartTime    time.Time
+	uploadEndTime      time.Time
 }
 
 func startGCSProxyServer(ctx context.Context, listenAddress string) error {
@@ -98,7 +101,7 @@ func handleConnection(ctx context.Context, conn net.Conn, uploadSessions *map[st
 	session, exists := (*uploadSessions)[sessionKey]
 	if !exists {
 		var failed bool
-		session, failed = createNewSession(ctx, uploadSessionsMutex, bucketName, objectName, session, uploadSessions, sessionKey)
+		session, failed = createNewSession(ctx, uploadSessionsMutex, bucketName, objectName, uploadSessions, sessionKey)
 		if failed {
 			return
 		}
@@ -149,7 +152,7 @@ func handleConnection(ctx context.Context, conn net.Conn, uploadSessions *map[st
 	uploadSessionsMutex.Unlock()
 }
 
-func createNewSession(ctx context.Context, uploadSessionsMutex *sync.Mutex, bucketName string, objectName string, session *UploadSession, uploadSessions *map[string]*UploadSession, sessionKey string) (*UploadSession, bool) {
+func createNewSession(ctx context.Context, uploadSessionsMutex *sync.Mutex, bucketName string, objectName string, uploadSessions *map[string]*UploadSession, sessionKey string) (*UploadSession, bool) {
 	sessionCtx, cancelFunc := context.WithTimeout(context.Background(), time.Hour)
 
 	gcsClient, err := utils.NewGcsClient(sessionCtx)
@@ -166,7 +169,7 @@ func createNewSession(ctx context.Context, uploadSessionsMutex *sync.Mutex, buck
 		cancelFunc()
 		return nil, true
 	}
-	session = &UploadSession{
+	session := &UploadSession{
 		uploadUrl:         uploadUrl,
 		gcsClient:         gcsClient,
 		resumeOffset:      0,
@@ -177,6 +180,7 @@ func createNewSession(ctx context.Context, uploadSessionsMutex *sync.Mutex, buck
 		objectName:        objectName,
 		sessionCtx:        sessionCtx,
 		cancelFunc:        cancelFunc,
+		uploadStartTime:   time.Now(),
 	}
 	(*uploadSessions)[sessionKey] = session
 
@@ -221,16 +225,32 @@ func handleWriteAt(ctx context.Context, conn net.Conn, session *UploadSession) e
 	}
 
 	limitedReader := io.LimitReader(conn, dataSize)
+	startTime := time.Now()
+
 	err := session.gcsClient.UploadObjectPart(ctx, session.uploadUrl, writeAtReq.ChunkBegin, limitedReader, dataSize, writeAtReq.IsLast != 0)
 	if err != nil {
 		return fmt.Errorf("failed to upload object part: %w", err)
 	}
 
+	elapsedTime := time.Since(startTime)
+	session.totalBytesUploaded += dataSize
+	chunkSpeed := float64(dataSize) / elapsedTime.Seconds()
+	fmt.Printf("Uploaded chunk to GCS [%d - %d] (%d bytes) in %.2f seconds (%.2f MB/s)\n",
+		writeAtReq.ChunkBegin, writeAtReq.ChunkEnd, dataSize, elapsedTime.Seconds(), chunkSpeed/(1024*1024))
+
 	session.resumeOffset = writeAtReq.ChunkEnd
 
 	if writeAtReq.IsLast != 0 {
 		session.isCompleted = true
+		session.uploadEndTime = time.Now()
 		session.cancelFunc()
+
+		totalUploadTime := session.uploadEndTime.Sub(session.uploadStartTime)
+		averageSpeed := float64(session.totalBytesUploaded) / totalUploadTime.Seconds()
+
+		fmt.Printf("Upload completed for %s/%s\n", session.bucketName, session.objectName)
+		fmt.Printf("Total uploaded: %d bytes in %.2f seconds (Average speed: %.2f MB/s)\n",
+			session.totalBytesUploaded, totalUploadTime.Seconds(), averageSpeed/(1024*1024))
 	}
 
 	return nil

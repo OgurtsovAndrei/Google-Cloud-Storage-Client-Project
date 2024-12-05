@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"time"
 )
 
 type UnreliableProxyWriter struct {
@@ -19,7 +20,7 @@ type UnreliableProxyWriter struct {
 	sequenceNumber uint32
 }
 
-func NewUnreliableProxyWriter(ctx context.Context, proxyAddress, bucket, objectName string) (*UnreliableProxyWriter, error) {
+func NewUnreliableProxyWriter(proxyAddress, bucket, objectName string) (*UnreliableProxyWriter, error) {
 	conn, err := net.Dial("tcp", proxyAddress)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to GCSProxyServer: %w", err)
@@ -34,7 +35,6 @@ func NewUnreliableProxyWriter(ctx context.Context, proxyAddress, bucket, objectN
 		sequenceNumber: 0,
 	}
 
-	// Send init connection request
 	if err := upw.sendInitConnectionRequest(); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("failed to initialize connection: %w", err)
@@ -124,11 +124,16 @@ func (upw *UnreliableProxyWriter) WriteAt(ctx context.Context, chunkBegin, chunk
 		return 0, fmt.Errorf("failed to write request metadata: %w", err)
 	}
 
+	startTime := time.Now()
 	n, err := io.CopyN(conn, reader, size)
 	if err != nil {
 		upw.currentOffset = chunkBegin
 		return n, fmt.Errorf("failed to write data: %w", err)
 	}
+	elapsedTime := time.Since(startTime)
+	uploadSpeed := float64(n) / elapsedTime.Seconds()
+	fmt.Printf("Sent chunk to TCP [%d - %d] (%d bytes) in %.2f seconds (%.2f MB/s)\n",
+		chunkBegin, chunkEnd, n, elapsedTime.Seconds(), uploadSpeed/(1024*1024))
 
 	upw.currentOffset = chunkEnd
 	return n, nil
