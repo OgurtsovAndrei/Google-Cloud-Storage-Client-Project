@@ -1,6 +1,7 @@
 package writers
 
 import (
+	"awesomeProject/utils"
 	"context"
 	"errors"
 	"fmt"
@@ -14,7 +15,7 @@ type ReliableWriterConfig struct {
 }
 
 type ReliableWriterImpl struct {
-	data             ScatterGatherBuffer
+	data             utils.ScatterGatherBuffer
 	writtenBytes     uint64
 	offset           uint64
 	mutex            sync.Mutex
@@ -31,7 +32,7 @@ type ReliableWriterImpl struct {
 
 func NewReliableWriterImpl(ctx context.Context, writer UnreliableWriter, config ReliableWriterConfig) *ReliableWriterImpl {
 	rw := &ReliableWriterImpl{
-		data:             NewScatterGatherBuffer(),
+		data:             utils.NewScatterGatherBuffer(),
 		isComplete:       false,
 		suspendChan:      make(chan struct{}, 1),
 		writeEventsChan:  make(chan struct{}, 1),
@@ -93,7 +94,7 @@ func (rw *ReliableWriterImpl) WriteAt(ctx context.Context, buf []byte, off int64
 	rw.notifyWriteEvent()
 	fmt.Printf("Written %d bytes at offset %d\n", len(buf), off)
 
-	for rw.data.size > rw.MaxCacheSize {
+	for rw.data.Size() > rw.MaxCacheSize {
 		fmt.Printf("Suspend writer\n")
 		err := rw.SuspendAndWaitForAwake(ctx)
 		if err != nil {
@@ -150,7 +151,7 @@ func (rw *ReliableWriterImpl) Abort(ctx context.Context) {
 	rw.isComplete = false
 	rw.isAborted = true
 	rw.mutex.Unlock()
-	rw.data = NewScatterGatherBuffer()
+	rw.data = utils.NewScatterGatherBuffer()
 	rw.notifyWriteEvent()
 
 	select {
@@ -197,7 +198,7 @@ func (rw *ReliableWriterImpl) handleWriteEvents(ctx context.Context) (isFinished
 		}
 
 		rw.mutex.Lock()
-		var buf *ScatterGatherBuffer
+		var buf *utils.ScatterGatherBuffer
 		if canBeLast {
 			buf, err = rw.data.TakeBytesSafely(0, rw.MaxChunkSize, 0, 1)
 		} else {
@@ -210,12 +211,12 @@ func (rw *ReliableWriterImpl) handleWriteEvents(ctx context.Context) (isFinished
 
 		isLast := canBeLast && rw.data.IsEmpty()
 
-		if rw.data.size <= rw.MaxCacheSize/2 {
+		if rw.data.Size() <= rw.MaxCacheSize/2 {
 			rw.WakeUp()
 		}
 
 		chunkBegin := int64(rw.offset)
-		chunkEnd := chunkBegin + int64(buf.size)
+		chunkEnd := chunkBegin + int64(buf.Size())
 
 		written, err := rw.attemptWriteWithRetries(ctx, buf, chunkBegin, chunkEnd, isLast)
 		if err != nil {
@@ -233,7 +234,7 @@ func (rw *ReliableWriterImpl) handleWriteEvents(ctx context.Context) (isFinished
 	return false, nil
 }
 
-func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf *ScatterGatherBuffer, chunkBegin, chunkEnd int64, isLast bool) (int64, error) {
+func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf *utils.ScatterGatherBuffer, chunkBegin, chunkEnd int64, isLast bool) (int64, error) {
 	var totalWritten int64 = 0
 
 	for attempt := 0; attempt < 3; attempt++ {
@@ -248,7 +249,8 @@ func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf *
 
 		fmt.Printf("Error writing to unreliable writer (attempt %d): %v\n", attempt+1, err)
 
-		buf.DropFirst(uint32(written))
+		totalWritten, err = rw.unreliableWriter.GetResumeOffset(ctx)
+		buf.DropFirst(uint32(totalWritten - chunkBegin))
 
 		if ctx.Err() != nil {
 			return totalWritten, ctx.Err()

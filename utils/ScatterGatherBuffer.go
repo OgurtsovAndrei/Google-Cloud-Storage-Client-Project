@@ -1,4 +1,4 @@
-package writers
+package utils
 
 import (
 	"errors"
@@ -136,6 +136,10 @@ func (sgb *ScatterGatherBuffer) AddBytesToFront(data []byte) {
 
 func (sgb *ScatterGatherBuffer) IsEmpty() bool {
 	return sgb.size == 0
+}
+
+func (sgb *ScatterGatherBuffer) Size() uint32 {
+	return sgb.size
 }
 
 func (sgb *ScatterGatherBuffer) Read(p []byte) (n int, err error) {

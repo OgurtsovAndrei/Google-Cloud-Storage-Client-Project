@@ -16,7 +16,6 @@ import (
 type UploadSession struct {
 	uploadUrl          string
 	gcsClient          *utils.GcsClient
-	resumeOffset       int64
 	isAborted          bool
 	isCompleted        bool
 	activeConnections  int
@@ -27,6 +26,11 @@ type UploadSession struct {
 	totalBytesUploaded int64
 	uploadStartTime    time.Time
 	uploadEndTime      time.Time
+
+	chunkLock             sync.Mutex
+	chunkWrittenEventChan chan struct{}
+	currentChunkBeginOff  int64
+	currentChunk          *utils.BuildableBuffer
 }
 
 func StartGCSProxyServer(ctx context.Context, listenAddress string) error {
@@ -76,13 +80,13 @@ func handleConnection(ctx context.Context, conn net.Conn, uploadSessions *map[st
 		return
 	}
 
-	session, sessionKey, err := handleInitConnection(ctx, conn, uploadSessions, uploadSessionsMutex, header)
+	session, sessionKey, err := handleInitConnection(ctx, conn, uploadSessions, uploadSessionsMutex)
 	if err != nil {
 		sendErrorResponse(conn, header.SequenceNumber, err)
 		return
 	}
 
-	sendSuccessResponse(conn, header.SequenceNumber, "") // Send success response for connection initialization only.
+	sendSuccessResponse(conn, header.SequenceNumber, "")
 
 	for {
 		var reqHeader RequestHeader
@@ -123,7 +127,7 @@ func handleConnection(ctx context.Context, conn net.Conn, uploadSessions *map[st
 	uploadSessionsMutex.Unlock()
 }
 
-func handleInitConnection(ctx context.Context, conn net.Conn, uploadSessions *map[string]*UploadSession, uploadSessionsMutex *sync.Mutex, header RequestHeader) (*UploadSession, string, error) {
+func handleInitConnection(ctx context.Context, conn net.Conn, uploadSessions *map[string]*UploadSession, uploadSessionsMutex *sync.Mutex) (*UploadSession, string, error) {
 	var initReq InitConnectionRequestHeader
 	if err := binary.Read(conn, binary.BigEndian, &initReq); err != nil {
 		return nil, "", fmt.Errorf("failed to read InitConnectionRequestHeader: %w", err)
@@ -178,17 +182,19 @@ func createNewSession(ctx context.Context, uploadSessionsMutex *sync.Mutex, buck
 		return nil, true
 	}
 	session := &UploadSession{
-		uploadUrl:         uploadUrl,
-		gcsClient:         gcsClient,
-		resumeOffset:      0,
-		isAborted:         false,
-		isCompleted:       false,
-		activeConnections: 1,
-		bucketName:        bucketName,
-		objectName:        objectName,
-		sessionCtx:        sessionCtx,
-		cancelFunc:        cancelFunc,
-		uploadStartTime:   time.Now(),
+		uploadUrl:            uploadUrl,
+		gcsClient:            gcsClient,
+		currentChunkBeginOff: 0,
+		isAborted:            false,
+		isCompleted:          false,
+		activeConnections:    1,
+		bucketName:           bucketName,
+		objectName:           objectName,
+		sessionCtx:           sessionCtx,
+		cancelFunc:           cancelFunc,
+		uploadStartTime:      time.Now(),
+
+		chunkWrittenEventChan: make(chan struct{}, 1),
 	}
 	(*uploadSessions)[sessionKey] = session
 
@@ -219,34 +225,70 @@ func handleWriteAt(ctx context.Context, conn net.Conn, session *UploadSession, h
 	if err := binary.Read(conn, binary.BigEndian, &writeAtReq); err != nil {
 		return fmt.Errorf("failed to read WriteAtRequestHeader: %w", err)
 	}
-
-	dataSize := writeAtReq.ChunkEnd - writeAtReq.ChunkBegin
-	if dataSize <= 0 {
-		return errors.New("invalid data size")
-	}
-
 	if session.isAborted {
 		return errors.New("upload session is aborted")
 	}
-	if writeAtReq.ChunkBegin != session.resumeOffset {
-		return fmt.Errorf("chunk begin %d does not match resume offset %d", writeAtReq.ChunkBegin, session.resumeOffset)
+
+	session.chunkLock.Lock()
+	println("lock")
+	if session.currentChunkBeginOff != writeAtReq.ChunkBegin {
+		if session.currentChunk != nil {
+			select {
+			case <-session.chunkWrittenEventChan:
+			default:
+				session.chunkLock.Unlock()
+				println("UN lock")
+				fmt.Printf("out of odred write!")
+				return fmt.Errorf("out of order write at") // Need to retry later
+			}
+		}
 	}
+	if session.currentChunk == nil {
+		session.currentChunk = utils.NewBuildableBuffer(uint32(writeAtReq.Size))
+		session.chunkLock.Unlock()
+		println("UN lock")
 
-	limitedReader := io.LimitReader(conn, dataSize)
-	startTime := time.Now()
+		err := writeToChunkReader(writeAtReq, conn, session.currentChunk, session)
+		if err != nil {
+			return err
+		}
 
-	err := session.gcsClient.UploadObjectPart(ctx, session.uploadUrl, writeAtReq.ChunkBegin, limitedReader, dataSize, writeAtReq.IsLast != 0)
+		// fixme: now order of returns of write to buffer and load requests are not synchronized
+		go loadChunkToGCS(ctx, conn, header, writeAtReq, err, session)
+		return nil
+	}
+	currentChunkReader := session.currentChunk
+	session.chunkLock.Unlock()
+	println("UN lock")
+
+	err := writeToChunkReader(writeAtReq, conn, currentChunkReader, session)
 	if err != nil {
-		return fmt.Errorf("failed to upload object part: %w", err)
+		return err
 	}
 
-	elapsedTime := time.Since(startTime)
-	session.totalBytesUploaded += dataSize
-	chunkSpeed := float64(dataSize) / elapsedTime.Seconds()
-	fmt.Printf("Uploaded chunk to GCS [%d - %d] (%d bytes) in %.2f seconds (%.2f MB/s)\n",
-		writeAtReq.ChunkBegin, writeAtReq.ChunkEnd, dataSize, elapsedTime.Seconds(), chunkSpeed/(1024*1024))
+	return nil
+}
 
-	session.resumeOffset = writeAtReq.ChunkEnd
+func loadChunkToGCS(ctx context.Context, conn net.Conn, header RequestHeader, writeAtReq WriteAtRequestHeader, err error, session *UploadSession) {
+	chunkSize := writeAtReq.ChunkEnd - writeAtReq.ChunkBegin
+	err = session.gcsClient.UploadObjectPart(ctx, session.uploadUrl, writeAtReq.ChunkBegin, session.currentChunk, chunkSize, writeAtReq.IsLast != 0)
+	if err != nil {
+		err := fmt.Errorf("failed to upload object part: %w", err)
+		sendErrorResponse(conn, header.SequenceNumber, err)
+		return
+	}
+
+	select {
+	case session.chunkWrittenEventChan <- struct{}{}:
+	default:
+	}
+
+	session.chunkLock.Lock()
+	println("lock")
+	defer println("UN lock")
+	defer session.chunkLock.Unlock()
+	session.currentChunk = nil
+	session.currentChunkBeginOff = writeAtReq.ChunkEnd
 
 	if writeAtReq.IsLast != 0 {
 		session.isCompleted = true
@@ -260,8 +302,34 @@ func handleWriteAt(ctx context.Context, conn net.Conn, session *UploadSession, h
 		fmt.Printf("Total uploaded: %d bytes in %.2f seconds (Average speed: %.2f MB/s)\n",
 			session.totalBytesUploaded, totalUploadTime.Seconds(), averageSpeed/(1024*1024))
 	}
+	//sendSuccessResponse(conn, header.SequenceNumber, "CHUNK LOADED SUCCESSFULLY")
+	return
+}
 
+func writeToChunkReader(writeAtReq WriteAtRequestHeader, conn net.Conn, currentChunkReader *utils.BuildableBuffer, session *UploadSession) error {
+	if writeAtReq.Size <= 0 {
+		return errors.New("invalid data size")
+	}
+	startTime := time.Now()
+
+	buf := make([]byte, writeAtReq.Size)
+	if err := binary.Read(conn, binary.BigEndian, &buf); err != nil {
+		return fmt.Errorf("failed to read WriteAtRequestHeader: %w", err)
+	}
+	if err := currentChunkReader.WriteToOffset(uint32(writeAtReq.Off-writeAtReq.ChunkBegin), buf); err != nil {
+		return err
+	}
+
+	fillLoadingSpeedData(startTime, session, writeAtReq)
 	return nil
+}
+
+func fillLoadingSpeedData(startTime time.Time, session *UploadSession, writeAtReq WriteAtRequestHeader) {
+	elapsedTime := time.Since(startTime)
+	session.totalBytesUploaded += writeAtReq.Size
+	chunkSpeed := float64(writeAtReq.Size) / elapsedTime.Seconds()
+	fmt.Printf("Uploaded chunk to GCS [%d - %d] (%d bytes) in %.2f seconds (%.2f MB/s)\n",
+		writeAtReq.ChunkBegin, writeAtReq.ChunkEnd, writeAtReq.Size, elapsedTime.Seconds(), chunkSpeed/(1024*1024))
 }
 
 func handleGetResumeOffset(conn net.Conn, session *UploadSession, header RequestHeader) error {
@@ -274,7 +342,7 @@ func handleGetResumeOffset(conn net.Conn, session *UploadSession, header Request
 		session.isCompleted = true
 	}
 
-	session.resumeOffset = gcsOffset
+	session.currentChunkBeginOff = gcsOffset
 
 	if err := binary.Write(conn, binary.BigEndian, gcsOffset); err != nil {
 		return fmt.Errorf("failed to send resume offset: %w", err)

@@ -10,7 +10,6 @@ const (
 type RequestHeader struct {
 	SequenceNumber uint32
 	RequestType    uint32
-	RequestSize    uint32
 }
 
 type ResponseHeader struct {
@@ -27,6 +26,8 @@ type InitConnectionRequestHeader struct {
 type WriteAtRequestHeader struct {
 	ChunkBegin int64
 	ChunkEnd   int64
+	Off        int64
+	Size       int64
 	IsLast     byte
 }
 

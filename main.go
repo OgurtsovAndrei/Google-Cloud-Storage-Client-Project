@@ -32,8 +32,6 @@ func main() {
 		}
 	}()
 
-	time.Sleep(1 * time.Second)
-
 	//unreliableWriter, err := writers.NewUnreliableLocalWriter(fileName)
 	//unreliableWriter, err := writers.NewUnreliableGCSWriter(ctx, bucket, fileName)
 	unreliableWriter, err := writers.NewUnreliableProxyWriter("localhost"+listenAddress, bucket, fileName)
