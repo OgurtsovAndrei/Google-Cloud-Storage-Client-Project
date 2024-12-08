@@ -2,6 +2,7 @@ package writers
 
 import (
 	"awesomeProject/proxy"
+	"awesomeProject/utils"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -14,7 +15,9 @@ import (
 )
 
 type UnreliableProxyWriter struct {
-	connection     net.Conn
+	connections    []net.Conn
+	resumeConn     net.Conn
+	abortConn      net.Conn
 	bucket         string
 	objectName     string
 	currentOffset  int64
@@ -23,31 +26,62 @@ type UnreliableProxyWriter struct {
 	nConnections   uint32
 }
 
-func NewUnreliableProxyWriter(proxyAddress, bucket, objectName string) (*UnreliableProxyWriter, error) {
-	conn, err := net.Dial("tcp", proxyAddress)
+func NewUnreliableProxyWriter(proxyAddress, bucket, objectName string, nConnections uint32) (*UnreliableProxyWriter, error) {
+	connections := make([]net.Conn, nConnections)
+	for i := range connections {
+		conn, err := net.Dial("tcp", proxyAddress)
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect to GCSProxyServer: %w", err)
+		}
+		connections[i] = conn
+	}
+
+	resumeConn, err := net.Dial("tcp", proxyAddress)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to GCSProxyServer: %w", err)
+		return nil, fmt.Errorf("failed to create resume connection: %w", err)
+	}
+
+	abortConn, err := net.Dial("tcp", proxyAddress)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create abort connection: %w", err)
 	}
 
 	upw := &UnreliableProxyWriter{
-		connection:     conn,
+		connections:    connections,
+		resumeConn:     resumeConn,
+		abortConn:      abortConn,
 		bucket:         bucket,
 		objectName:     objectName,
 		currentOffset:  0,
 		isAborted:      false,
 		sequenceNumber: 0,
-		nConnections:   2,
+		nConnections:   nConnections,
 	}
 
-	if err := upw.sendInitConnectionRequest(); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("failed to initialize connection: %w", err)
+	if err := upw.initAllConnections(); err != nil {
+		upw.Close()
+		return nil, fmt.Errorf("failed to initialize connections: %w", err)
 	}
 
 	return upw, nil
 }
 
-func (upw *UnreliableProxyWriter) sendInitConnectionRequest() error {
+func (upw *UnreliableProxyWriter) initAllConnections() error {
+	for _, conn := range upw.connections {
+		if err := upw.initConnection(conn); err != nil {
+			return err
+		}
+	}
+	if err := upw.initConnection(upw.resumeConn); err != nil {
+		return err
+	}
+	if err := upw.initConnection(upw.abortConn); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (upw *UnreliableProxyWriter) initConnection(conn net.Conn) error {
 	upw.sequenceNumber++
 	header := proxy.RequestHeader{
 		SequenceNumber: upw.sequenceNumber,
@@ -72,18 +106,17 @@ func (upw *UnreliableProxyWriter) sendInitConnectionRequest() error {
 	buf.Write(bucketNameBytes)
 	buf.Write(objectNameBytes)
 
-	if _, err := upw.connection.Write(buf.Bytes()); err != nil {
+	if _, err := conn.Write(buf.Bytes()); err != nil {
 		return fmt.Errorf("failed to send init connection request: %w", err)
 	}
 
-	if code, msg := upw.receiveResponse(); code != 0 {
-		fmt.Printf("Error in init connection response: %s\n", msg)
+	if code, msg := upw.receiveResponse(conn); code != 0 {
 		return fmt.Errorf("error in init connection: %s", msg)
 	}
 	return nil
 }
 
-func (upw *UnreliableProxyWriter) WriteAt(ctx context.Context, chunkBegin, chunkEnd int64, reader io.Reader, isLast bool) (int64, error) {
+func (upw *UnreliableProxyWriter) WriteAt(ctx context.Context, chunkBegin, chunkEnd int64, reader *utils.ScatterGatherBuffer, isLast bool) (int64, error) {
 	if upw.isAborted {
 		return 0, errors.New("operation aborted")
 	}
@@ -97,50 +130,72 @@ func (upw *UnreliableProxyWriter) WriteAt(ctx context.Context, chunkBegin, chunk
 		return 0, errors.New("invalid chunk size")
 	}
 
-	var wg sync.WaitGroup
+	partSize := uint32(size) / upw.nConnections
 
-	start := 0
-	for i := 0; i < ; i++ {
-		end := start + partSize
-		if i == n-1 {
-			end += remainder // Add the remainder to the last part
+	var wg sync.WaitGroup
+	results := make(chan int64, upw.nConnections)
+	errorsChan := make(chan error, upw.nConnections)
+
+	start := uint32(chunkBegin)
+	for i := uint32(0); i < upw.nConnections; i++ {
+		part, _ := reader.TakeBytesUnsafe(partSize)
+		if part.Size() != partSize {
+			println("WTF")
 		}
 
-		part := chunk[start:end] // Slice the array for this part
+		upw.sequenceNumber++
+
+		header := proxy.RequestHeader{
+			SequenceNumber: upw.sequenceNumber,
+			RequestType:    proxy.MessageTypeUploadPart,
+		}
+
+		writeAtReq := proxy.WriteAtRequestHeader{
+			ChunkBegin: chunkBegin,
+			ChunkEnd:   chunkEnd,
+			Off:        int64(start),
+			Size:       int64(part.Size()),
+			IsLast:     boolToByte(isLast),
+		}
 
 		wg.Add(1)
-		go func(p []byte) {
+		go func(conn net.Conn, hdr proxy.RequestHeader, req proxy.WriteAtRequestHeader, p io.Reader) {
 			defer wg.Done()
-			process(p)
-		}(part)
+			n, err := upw.sentPartToTcp(conn, hdr, req, p)
+			if err != nil {
+				println(err.Error())
+				errorsChan <- err
+				return
+			}
+			results <- n
+		}(upw.connections[i], header, writeAtReq, part)
 
-		start = end
+		start = start + partSize
 	}
 
-	wg.Wait()
-	fmt.Println("All parts processed")
+	go func() {
+		wg.Wait()
+		close(results)
+		close(errorsChan)
+	}()
 
-	upw.sequenceNumber++
-
-	header := proxy.RequestHeader{
-		SequenceNumber: upw.sequenceNumber,
-		RequestType:    proxy.MessageTypeUploadPart,
+	var totalWritten int64
+	for r := range results {
+		totalWritten += r
 	}
 
-	writeAtReq := proxy.WriteAtRequestHeader{
-		ChunkBegin: chunkBegin,
-		ChunkEnd:   chunkEnd,
-		Off:        chunkBegin,
-		Size:       chunkEnd - chunkBegin,
-		IsLast:     boolToByte(isLast),
+	select {
+	case err := <-errorsChan:
+		return 0, err
+	default:
 	}
 
 	upw.currentOffset = chunkEnd
-	return chunkBegin - chunkEnd, nil
+	return totalWritten, nil
 }
 
 func (upw *UnreliableProxyWriter) sentPartToTcp(
-	ctx context.Context,
+	conn net.Conn,
 	header proxy.RequestHeader,
 	writeAtReq proxy.WriteAtRequestHeader,
 	reader io.Reader,
@@ -154,7 +209,6 @@ func (upw *UnreliableProxyWriter) sentPartToTcp(
 		return 0, fmt.Errorf("failed to write WriteAtRequestHeader: %w", err)
 	}
 
-	conn := upw.connection
 	if _, err := conn.Write(buf.Bytes()); err != nil {
 		return 0, fmt.Errorf("failed to write request metadata: %w", err)
 	}
@@ -165,9 +219,9 @@ func (upw *UnreliableProxyWriter) sentPartToTcp(
 		return n, fmt.Errorf("failed to write data: %w", err)
 	}
 
-	if code, msg := upw.receiveResponse(); code != 0 {
+	if code, msg := upw.receiveResponse(conn); code != 0 {
 		fmt.Printf("Error in write at response: %s\n", msg)
-		return n, fmt.Errorf("failed to write data: code: %d, msg: %w", code, err)
+		return n, fmt.Errorf("failed to write data: code: %d, msg: %s", code, msg)
 	}
 
 	//if code, msg := upw.receiveResponse(); code != 0 {
@@ -199,19 +253,17 @@ func (upw *UnreliableProxyWriter) GetResumeOffset(ctx context.Context) (int64, e
 		return 0, fmt.Errorf("failed to write request header: %w", err)
 	}
 
-	conn := upw.connection
-	if _, err := conn.Write(buf.Bytes()); err != nil {
+	if _, err := upw.resumeConn.Write(buf.Bytes()); err != nil {
 		return 0, fmt.Errorf("failed to write GetResumeOffset request: %w", err)
 	}
 
 	var resumeOffset int64
-	if err := binary.Read(conn, binary.BigEndian, &resumeOffset); err != nil {
+	if err := binary.Read(upw.resumeConn, binary.BigEndian, &resumeOffset); err != nil {
 		return 0, fmt.Errorf("failed to read resume offset: %w", err)
 	}
 
-	if code, msg := upw.receiveResponse(); code != 0 {
-		fmt.Printf("Error in get resume off response: %s\n", msg)
-		return 0, fmt.Errorf("error in get resume off: %s", msg)
+	if code, msg := upw.receiveResponse(upw.resumeConn); code != 0 {
+		return 0, fmt.Errorf("error in get resume offset: %s", msg)
 	}
 
 	upw.currentOffset = resumeOffset
@@ -236,30 +288,35 @@ func (upw *UnreliableProxyWriter) Abort(ctx context.Context) {
 		return
 	}
 
-	conn := upw.connection
-	if _, err := conn.Write(buf.Bytes()); err != nil {
+	if _, err := upw.abortConn.Write(buf.Bytes()); err != nil {
 		fmt.Println("Error sending abort request:", err)
 		return
 	}
 
-	if code, msg := upw.receiveResponse(); code != 0 {
+	if code, msg := upw.receiveResponse(upw.abortConn); code != 0 {
 		fmt.Printf("Error in abort response: %s\n", msg)
 	}
 }
 
-func (upw *UnreliableProxyWriter) receiveResponse() (code uint32, msg string) {
+func (upw *UnreliableProxyWriter) receiveResponse(conn net.Conn) (uint32, string) {
 	var resp proxy.ResponseHeader
-	if err := binary.Read(upw.connection, binary.BigEndian, &resp); err != nil {
+	if err := binary.Read(conn, binary.BigEndian, &resp); err != nil {
 		return 1, fmt.Sprintf("failed to read response header: %s", err.Error())
 	}
 
 	message := make([]byte, resp.MessageLength)
-	if _, err := io.ReadFull(upw.connection, message); err != nil {
+	if _, err := io.ReadFull(conn, message); err != nil {
 		return 1, fmt.Sprintf("failed to read response message: %s", err.Error())
 	}
-	fmt.Printf("Response revived: %s\n", string(message))
 	return resp.StatusCode, string(message)
+}
 
+func (upw *UnreliableProxyWriter) Close() {
+	for _, conn := range upw.connections {
+		_ = conn.Close()
+	}
+	_ = upw.resumeConn.Close()
+	_ = upw.abortConn.Close()
 }
 
 func boolToByte(b bool) byte {

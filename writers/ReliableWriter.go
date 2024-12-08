@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
 
 type ReliableWriterConfig struct {
@@ -236,9 +237,12 @@ func (rw *ReliableWriterImpl) handleWriteEvents(ctx context.Context) (isFinished
 
 func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf *utils.ScatterGatherBuffer, chunkBegin, chunkEnd int64, isLast bool) (int64, error) {
 	var totalWritten int64 = 0
+	backoff := 10 * time.Millisecond
 
-	for attempt := 0; attempt < 3; attempt++ {
-		reader := buf
+	n := 100
+
+	for attempt := 0; attempt < n; attempt++ {
+		reader := buf.Copy()
 
 		written, err := rw.unreliableWriter.WriteAt(ctx, chunkBegin+totalWritten, chunkEnd, reader, isLast)
 		totalWritten += written
@@ -249,13 +253,26 @@ func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf *
 
 		fmt.Printf("Error writing to unreliable writer (attempt %d): %v\n", attempt+1, err)
 
-		totalWritten, err = rw.unreliableWriter.GetResumeOffset(ctx)
-		buf.DropFirst(uint32(totalWritten - chunkBegin))
+		receivedOffset, err := rw.unreliableWriter.GetResumeOffset(ctx)
+		totalWritten = receivedOffset - chunkBegin
+		if receivedOffset == chunkEnd {
+			return totalWritten, nil
+		}
+		buf.DropFirst(uint32(totalWritten))
 
 		if ctx.Err() != nil {
 			return totalWritten, ctx.Err()
 		}
+
+		if attempt == n-1 {
+			break
+		}
+		time.Sleep(backoff)
+		if backoff > time.Second {
+			backoff = time.Second
+		}
+		backoff *= 10
 	}
 
-	return totalWritten, errors.New("failed to write after 3 attempts")
+	return totalWritten, errors.New("failed to write after 5 attempts")
 }

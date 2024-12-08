@@ -230,37 +230,36 @@ func handleWriteAt(ctx context.Context, conn net.Conn, session *UploadSession, h
 	}
 
 	session.chunkLock.Lock()
-	println("lock")
 	if session.currentChunkBeginOff != writeAtReq.ChunkBegin {
 		if session.currentChunk != nil {
 			select {
 			case <-session.chunkWrittenEventChan:
 			default:
 				session.chunkLock.Unlock()
-				println("UN lock")
-				fmt.Printf("out of odred write!")
+				fmt.Printf("out of odred write at, expected offset %d received %d!\n", session.currentChunkBeginOff, writeAtReq.ChunkBegin)
 				return fmt.Errorf("out of order write at") // Need to retry later
 			}
 		}
 	}
 	if session.currentChunk == nil {
-		session.currentChunk = utils.NewBuildableBuffer(uint32(writeAtReq.Size))
+		session.currentChunk = utils.NewBuildableBuffer(uint32(writeAtReq.ChunkEnd - writeAtReq.ChunkBegin))
 		session.chunkLock.Unlock()
-		println("UN lock")
 
+		fmt.Printf("Write to buff, off: %d, size: %d\n", writeAtReq.Off, writeAtReq.Size)
 		err := writeToChunkReader(writeAtReq, conn, session.currentChunk, session)
 		if err != nil {
 			return err
 		}
 
 		// fixme: now order of returns of write to buffer and load requests are not synchronized
-		go loadChunkToGCS(ctx, conn, header, writeAtReq, err, session)
+		/* go */
+		loadChunkToGCS(ctx, conn, header, writeAtReq, err, session)
 		return nil
 	}
 	currentChunkReader := session.currentChunk
 	session.chunkLock.Unlock()
-	println("UN lock")
 
+	fmt.Printf("Write to buff, off: %d, size: %d\n", writeAtReq.Off, writeAtReq.Size)
 	err := writeToChunkReader(writeAtReq, conn, currentChunkReader, session)
 	if err != nil {
 		return err
@@ -284,11 +283,12 @@ func loadChunkToGCS(ctx context.Context, conn net.Conn, header RequestHeader, wr
 	}
 
 	session.chunkLock.Lock()
-	println("lock")
-	defer println("UN lock")
 	defer session.chunkLock.Unlock()
 	session.currentChunk = nil
 	session.currentChunkBeginOff = writeAtReq.ChunkEnd
+
+	fmt.Printf("Chunk loaded [%d - %d] (%d bytes)\n",
+		writeAtReq.Off, writeAtReq.Off+writeAtReq.Size, writeAtReq.Size)
 
 	if writeAtReq.IsLast != 0 {
 		session.isCompleted = true
@@ -310,17 +310,20 @@ func writeToChunkReader(writeAtReq WriteAtRequestHeader, conn net.Conn, currentC
 	if writeAtReq.Size <= 0 {
 		return errors.New("invalid data size")
 	}
-	startTime := time.Now()
+	//startTime := time.Now()
 
 	buf := make([]byte, writeAtReq.Size)
 	if err := binary.Read(conn, binary.BigEndian, &buf); err != nil {
 		return fmt.Errorf("failed to read WriteAtRequestHeader: %w", err)
 	}
+	if writeAtReq.Off-writeAtReq.ChunkBegin < 0 {
+		panic("Lalala")
+	}
 	if err := currentChunkReader.WriteToOffset(uint32(writeAtReq.Off-writeAtReq.ChunkBegin), buf); err != nil {
 		return err
 	}
 
-	fillLoadingSpeedData(startTime, session, writeAtReq)
+	//fillLoadingSpeedData(startTime, session, writeAtReq)
 	return nil
 }
 

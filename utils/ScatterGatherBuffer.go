@@ -181,3 +181,46 @@ func (sgb *ScatterGatherBuffer) DropFirst(amount uint32) {
 
 	sgb.size -= dropped
 }
+
+func (sgb *ScatterGatherBuffer) TakeBytesUnsafe(number uint32) (*ScatterGatherBuffer, error) {
+	if sgb.buffer.Len() == 0 {
+		return sgb, errors.New("buffer is empty")
+	}
+
+	if number > sgb.size {
+		return sgb, errors.New("buffer is not big enough")
+	}
+
+	resultSGB := NewScatterGatherBuffer()
+	var collected uint32
+
+	for collected < number && sgb.buffer.Len() > 0 {
+		front := sgb.buffer.PopFront()
+		frontLen := uint32(len(front))
+		if collected+frontLen <= number {
+			resultSGB.AddBytes(front)
+			collected += frontLen
+			sgb.size -= frontLen
+		} else {
+			remaining := number - collected
+			resultSGB.AddBytes(front[:remaining])
+			sgb.buffer.PushFront(front[remaining:])
+			collected += remaining
+			sgb.size -= remaining
+		}
+	}
+
+	return &resultSGB, nil
+}
+
+func (sgb *ScatterGatherBuffer) Copy() *ScatterGatherBuffer {
+	copyBuffer := NewScatterGatherBuffer()
+
+	for i := 0; i < sgb.buffer.Len(); i++ {
+		copyBuffer.buffer.PushBack(sgb.buffer.At(i))
+	}
+
+	copyBuffer.size = sgb.size
+
+	return &copyBuffer
+}
