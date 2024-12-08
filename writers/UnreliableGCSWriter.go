@@ -5,14 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
+	"io"
 	"time"
 )
 
 type UnreliableGCSWriter struct {
 	gcsClient  *utils.GcsClient
 	uploadUrl  string
-	mu         sync.Mutex
 	resumeOff  int64
 	isAborted  bool
 	bucket     string
@@ -38,9 +37,7 @@ func NewUnreliableGCSWriter(ctx context.Context, bucket, objectName string) (*Un
 	}, nil
 }
 
-func (ugw *UnreliableGCSWriter) WriteAt(ctx context.Context, chunkBegin, chunkEnd int64, buf []byte, isLast bool) (int64, error) {
-	ugw.mu.Lock()
-	defer ugw.mu.Unlock()
+func (ugw *UnreliableGCSWriter) WriteAt(ctx context.Context, chunkBegin, chunkEnd int64, reader io.Reader, isLast bool) (int64, error) {
 
 	if ugw.isAborted {
 		return 0, errors.New("operation aborted")
@@ -50,12 +47,10 @@ func (ugw *UnreliableGCSWriter) WriteAt(ctx context.Context, chunkBegin, chunkEn
 		fmt.Printf(msg)
 		return 0, errors.New(msg)
 	}
-	if chunkEnd-chunkBegin != int64(len(buf)) {
-		return 0, errors.New("buffer size does not match chunk range")
-	}
+	size := chunkEnd - chunkBegin
 
 	writeStart := time.Now()
-	err := ugw.gcsClient.UploadObjectPart(ctx, ugw.uploadUrl, chunkBegin, buf, isLast)
+	err := ugw.gcsClient.UploadObjectPart(ctx, ugw.uploadUrl, chunkBegin, reader, size, isLast)
 	writeDuration := time.Since(writeStart).Seconds()
 
 	if err != nil {
@@ -63,17 +58,14 @@ func (ugw *UnreliableGCSWriter) WriteAt(ctx context.Context, chunkBegin, chunkEn
 		return 0, err
 	}
 
-	uploadSpeed := float64(len(buf)) / writeDuration / (1024 * 1024) // MB/s
-	fmt.Printf("Uploaded %d bytes at offset %d with speed %.2f MB/s\n", len(buf), chunkBegin, uploadSpeed)
-	ugw.resumeOff = chunkBegin + int64(len(buf))
+	uploadSpeed := float64(size) / writeDuration / (1024 * 1024) // MB/s
+	fmt.Printf("Uploaded %d bytes at offset %d with speed %.2f MB/s\n", size, chunkBegin, uploadSpeed)
+	ugw.resumeOff = chunkBegin + int64(size)
 
-	return int64(len(buf)), nil
+	return size, nil
 }
 
 func (ugw *UnreliableGCSWriter) GetResumeOffset(ctx context.Context) (int64, error) {
-	ugw.mu.Lock()
-	defer ugw.mu.Unlock()
-
 	if ugw.isAborted {
 		return 0, errors.New("operation aborted")
 	}
@@ -90,9 +82,6 @@ func (ugw *UnreliableGCSWriter) GetResumeOffset(ctx context.Context) (int64, err
 }
 
 func (ugw *UnreliableGCSWriter) Abort(ctx context.Context) {
-	ugw.mu.Lock()
-	defer ugw.mu.Unlock()
-
 	ugw.isAborted = true
 	ugw.gcsClient.CancelUpload(ctx, ugw.uploadUrl)
 }

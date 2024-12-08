@@ -3,6 +3,7 @@ package writers
 import (
 	"errors"
 	"github.com/gammazero/deque"
+	"io"
 )
 
 type ScatterGatherBuffer struct {
@@ -31,9 +32,9 @@ func (sgb *ScatterGatherBuffer) AddSCG(anotherSGB *ScatterGatherBuffer) {
 	}
 }
 
-func (sgb *ScatterGatherBuffer) TakeBytes(minSize uint32, maxSize uint32, leftAtLeast uint32, alignment uint32) (ScatterGatherBuffer, error) {
+func (sgb *ScatterGatherBuffer) TakeBytesSafely(minSize uint32, maxSize uint32, leftAtLeast uint32, alignment uint32) (*ScatterGatherBuffer, error) {
 	if sgb.size < minSize+leftAtLeast {
-		return ScatterGatherBuffer{}, errors.New("buffer is not big enough")
+		return &ScatterGatherBuffer{}, errors.New("buffer is not big enough")
 	}
 
 	resultSGB := NewScatterGatherBuffer()
@@ -70,7 +71,7 @@ func (sgb *ScatterGatherBuffer) TakeBytes(minSize uint32, maxSize uint32, leftAt
 	sgb.checkSize()
 	resultSGB.checkSize()
 
-	return resultSGB, nil
+	return &resultSGB, nil
 }
 
 func (sgb *ScatterGatherBuffer) checkSize() {
@@ -137,15 +138,40 @@ func (sgb *ScatterGatherBuffer) IsEmpty() bool {
 	return sgb.size == 0
 }
 
-func (sgb *ScatterGatherBuffer) ToBytes() []byte {
-	result := make([]byte, sgb.size)
-	offset := 0
+func (sgb *ScatterGatherBuffer) GetPipeReader() *io.PipeReader {
+	reader, writer := io.Pipe()
 
-	for i := 0; i < sgb.buffer.Len(); i++ {
-		chunk := sgb.buffer.At(i)
-		copy(result[offset:], chunk)
-		offset += len(chunk)
+	go func() {
+		defer writer.Close()
+
+		for i := 0; i < sgb.buffer.Len(); i++ {
+			chunk := sgb.buffer.At(i)
+			_, err := writer.Write(chunk)
+			if err != nil {
+				_ = writer.CloseWithError(err)
+				return
+			}
+		}
+	}()
+
+	return reader
+}
+
+func (sgb *ScatterGatherBuffer) DropFirst(amount uint32) {
+	var dropped uint32
+
+	for dropped < amount && sgb.buffer.Len() > 0 {
+		front := sgb.buffer.PopFront()
+		frontLen := uint32(len(front))
+
+		if dropped+frontLen <= amount {
+			dropped += frontLen
+		} else {
+			remaining := amount - dropped
+			sgb.buffer.PushFront(front[remaining:])
+			dropped += remaining
+		}
 	}
 
-	return result
+	sgb.size -= dropped
 }

@@ -106,13 +106,21 @@ func (rw *ReliableWriterImpl) WriteAt(ctx context.Context, buf []byte, off int64
 }
 
 func (rw *ReliableWriterImpl) Complete(ctx context.Context) error {
-	if rw.isComplete {
+	rw.mutex.Lock()
+	isComplete := rw.isComplete
+	isAborted := rw.isAborted
+	if !isComplete && !isAborted {
+		rw.isComplete = true
+	}
+	rw.mutex.Unlock()
+
+	if isComplete {
 		return errors.New("already completed")
 	}
+	if isAborted {
+		return errors.New("was aborted")
+	}
 
-	rw.mutex.Lock()
-	rw.isComplete = true
-	rw.mutex.Unlock()
 	rw.notifyWriteEvent()
 	var err error
 	select {
@@ -137,10 +145,18 @@ func (rw *ReliableWriterImpl) Complete(ctx context.Context) error {
 
 func (rw *ReliableWriterImpl) Abort(ctx context.Context) {
 	rw.unreliableWriter.Abort(ctx)
+	rw.mutex.Lock()
 	rw.isComplete = false
 	rw.isAborted = true
+	rw.mutex.Unlock()
 	rw.data = NewScatterGatherBuffer()
-	rw.notifyWriteEvent() // To resume launch
+	rw.notifyWriteEvent()
+
+	select {
+	case <-ctx.Done():
+	case _ = <-rw.resultChan:
+	}
+
 	fmt.Println("Write operation aborted.")
 }
 
@@ -180,11 +196,11 @@ func (rw *ReliableWriterImpl) handleWriteEvents(ctx context.Context) (isFinished
 		}
 
 		rw.mutex.Lock()
-		var buf ScatterGatherBuffer
+		var buf *ScatterGatherBuffer
 		if canBeLast {
-			buf, err = rw.data.TakeBytes(0, rw.MaxChunkSize, 0, 1)
+			buf, err = rw.data.TakeBytesSafely(0, rw.MaxChunkSize, 0, 1)
 		} else {
-			buf, err = rw.data.TakeBytes(rw.MinChunkSize, rw.MaxChunkSize, rw.MinChunkSize, rw.MinChunkSize)
+			buf, err = rw.data.TakeBytesSafely(rw.MinChunkSize, rw.MaxChunkSize, rw.MinChunkSize, rw.MinChunkSize)
 		}
 		rw.mutex.Unlock()
 		if err != nil {
@@ -200,7 +216,7 @@ func (rw *ReliableWriterImpl) handleWriteEvents(ctx context.Context) (isFinished
 		chunkBegin := int64(rw.offset)
 		chunkEnd := chunkBegin + int64(buf.size)
 
-		written, err := rw.attemptWriteWithRetries(ctx, buf.ToBytes(), chunkBegin, chunkEnd, isLast)
+		written, err := rw.attemptWriteWithRetries(ctx, buf, chunkBegin, chunkEnd, isLast)
 		if err != nil {
 			fmt.Println("Failed to write after retries:", err)
 			rw.Abort(ctx)
@@ -216,12 +232,13 @@ func (rw *ReliableWriterImpl) handleWriteEvents(ctx context.Context) (isFinished
 	return false, nil
 }
 
-func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf []byte, chunkBegin, chunkEnd int64, isLast bool) (int64, error) {
+func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf *ScatterGatherBuffer, chunkBegin, chunkEnd int64, isLast bool) (int64, error) {
 	var totalWritten int64 = 0
-	remaining := buf
 
 	for attempt := 0; attempt < 3; attempt++ {
-		written, err := rw.unreliableWriter.WriteAt(ctx, chunkBegin+totalWritten, chunkEnd, remaining, isLast)
+		reader := buf.GetPipeReader()
+
+		written, err := rw.unreliableWriter.WriteAt(ctx, chunkBegin+totalWritten, chunkEnd, reader, isLast)
 		totalWritten += written
 
 		if err == nil {
@@ -230,9 +247,7 @@ func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf [
 
 		fmt.Printf("Error writing to unreliable writer (attempt %d): %v\n", attempt+1, err)
 
-		if written < int64(len(remaining)) {
-			remaining = remaining[written:]
-		}
+		buf.DropFirst(uint32(written))
 
 		if ctx.Err() != nil {
 			return totalWritten, ctx.Err()

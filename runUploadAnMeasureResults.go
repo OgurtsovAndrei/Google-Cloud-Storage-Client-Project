@@ -2,6 +2,7 @@ package main
 
 import (
 	"awesomeProject/utils"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -113,7 +114,7 @@ func uploadFileChunked(filePath, bucket string) (utils.UploadResult, error) {
 		}
 
 		// Upload the chunk
-		err = gcsClient.UploadObjectPart(ctx, uploadUrl, offset, buffer[:n], last)
+		err = gcsClient.UploadObjectPart(ctx, uploadUrl, offset, bytes.NewReader(buffer[:n]), int64(n), last)
 		if err != nil {
 			return utils.UploadResult{}, fmt.Errorf("failed to upload chunk at offset %d: %w", offset, err)
 		}
