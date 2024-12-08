@@ -144,6 +144,7 @@ func (rw *ReliableWriterImpl) Complete(ctx context.Context) error {
 }
 
 func (rw *ReliableWriterImpl) Abort(ctx context.Context) {
+	fmt.Println("Aborting write operation...")
 	rw.unreliableWriter.Abort(ctx)
 	rw.mutex.Lock()
 	rw.isComplete = false

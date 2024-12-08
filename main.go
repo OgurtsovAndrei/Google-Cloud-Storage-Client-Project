@@ -1,6 +1,7 @@
 package main
 
 import (
+	"awesomeProject/proxy"
 	"awesomeProject/writers"
 	"context"
 	"fmt"
@@ -25,7 +26,7 @@ func main() {
 	defer cancel()
 
 	go func() {
-		if err := startGCSProxyServer(ctx, listenAddress); err != nil {
+		if err := proxy.StartGCSProxyServer(ctx, listenAddress); err != nil {
 			fmt.Printf("Failed to start GCSProxyServer: %v\n", err)
 			cancel()
 		}
