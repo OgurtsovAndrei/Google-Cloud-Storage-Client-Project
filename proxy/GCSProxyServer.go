@@ -72,17 +72,17 @@ func handleConnection(ctx context.Context, conn net.Conn, uploadSessions *map[st
 	}
 
 	if header.RequestType != MessageTypeInitConnection {
-		sendErrorResponse(conn, header.SequenceNumber, errors.New("first request must be init connection request"))
+		sendErrorResponse(conn, header.RequestUid, errors.New("first request must be init connection request"))
 		return
 	}
 
 	session, sessionKey, err := handleInitConnection(ctx, conn, uploadSessions, uploadSessionsMutex, header)
 	if err != nil {
-		sendErrorResponse(conn, header.SequenceNumber, err)
+		sendErrorResponse(conn, header.RequestUid, err)
 		return
 	}
 
-	sendSuccessResponse(conn, header.SequenceNumber, "") // Send success response for connection initialization only.
+	sendSuccessResponse(conn, header.RequestUid, "") // Send success response for connection initialization only.
 
 	for {
 		var reqHeader RequestHeader
@@ -107,9 +107,9 @@ func handleConnection(ctx context.Context, conn net.Conn, uploadSessions *map[st
 		}
 
 		if err != nil {
-			sendErrorResponse(conn, reqHeader.SequenceNumber, err)
+			sendErrorResponse(conn, reqHeader.RequestUid, err)
 		} else {
-			sendSuccessResponse(conn, reqHeader.SequenceNumber, fmt.Sprintf("OK for %s", RequestTypeToString(reqHeader.RequestType)))
+			sendSuccessResponse(conn, reqHeader.RequestUid, fmt.Sprintf("OK for %s", RequestTypeToString(reqHeader.RequestType)))
 		}
 	}
 
@@ -124,9 +124,9 @@ func handleConnection(ctx context.Context, conn net.Conn, uploadSessions *map[st
 }
 
 func handleInitConnection(ctx context.Context, conn net.Conn, uploadSessions *map[string]*UploadSession, uploadSessionsMutex *sync.Mutex, header RequestHeader) (*UploadSession, string, error) {
-	var initReq InitConnectionRequestHeader
+	var initReq InitUploadSessionHeader
 	if err := binary.Read(conn, binary.BigEndian, &initReq); err != nil {
-		return nil, "", fmt.Errorf("failed to read InitConnectionRequestHeader: %w", err)
+		return nil, "", fmt.Errorf("failed to read InitUploadSessionHeader: %w", err)
 	}
 
 	bucketNameBytes := make([]byte, initReq.BucketNameLength)
@@ -300,9 +300,9 @@ func handleAbort(session *UploadSession) error {
 func sendSuccessResponse(conn net.Conn, seqNum uint32, message string) {
 	fmt.Printf("Sending operation success response: %s\n", message)
 	resp := ResponseHeader{
-		SequenceNumber: seqNum,
-		StatusCode:     0,
-		MessageLength:  uint32(len(message)),
+		RequestUid:    seqNum,
+		StatusCode:    0,
+		MessageLength: uint32(len(message)),
 	}
 	_ = binary.Write(conn, binary.BigEndian, &resp)
 	_, _ = conn.Write([]byte(message))
@@ -316,9 +316,9 @@ func sendErrorResponse(conn net.Conn, seqNum uint32, err error) {
 
 	msg := err.Error()
 	resp := ResponseHeader{
-		SequenceNumber: seqNum,
-		StatusCode:     1,
-		MessageLength:  uint32(len(msg)),
+		RequestUid:    seqNum,
+		StatusCode:    1,
+		MessageLength: uint32(len(msg)),
 	}
 	_ = binary.Write(conn, binary.BigEndian, &resp)
 	_, _ = conn.Write([]byte(msg))

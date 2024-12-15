@@ -47,14 +47,14 @@ func NewUnreliableProxyWriter(proxyAddress, bucket, objectName string) (*Unrelia
 func (upw *UnreliableProxyWriter) sendInitConnectionRequest() error {
 	upw.sequenceNumber++
 	header := proxy.RequestHeader{
-		SequenceNumber: upw.sequenceNumber,
-		RequestType:    proxy.MessageTypeInitConnection,
+		RequestUid:  upw.sequenceNumber,
+		RequestType: proxy.MessageTypeInitConnection,
 	}
 
 	bucketNameBytes := []byte(upw.bucket)
 	objectNameBytes := []byte(upw.objectName)
 
-	initReq := proxy.InitConnectionRequestHeader{
+	initReq := proxy.InitUploadSessionHeader{
 		BucketNameLength: uint32(len(bucketNameBytes)),
 		ObjectNameLength: uint32(len(objectNameBytes)),
 	}
@@ -67,7 +67,7 @@ func (upw *UnreliableProxyWriter) sendInitConnectionRequest() error {
 		return fmt.Errorf("failed to write request header: %w", err)
 	}
 	if err := binary.Write(buf, binary.BigEndian, &initReq); err != nil {
-		return fmt.Errorf("failed to write InitConnectionRequestHeader: %w", err)
+		return fmt.Errorf("failed to write InitUploadSessionHeader: %w", err)
 	}
 	buf.Write(bucketNameBytes)
 	buf.Write(objectNameBytes)
@@ -96,8 +96,8 @@ func (upw *UnreliableProxyWriter) WriteAt(ctx context.Context, chunkBegin, chunk
 	upw.sequenceNumber++
 
 	header := proxy.RequestHeader{
-		SequenceNumber: upw.sequenceNumber,
-		RequestType:    proxy.MessageTypeUploadPart,
+		RequestUid:  upw.sequenceNumber,
+		RequestType: proxy.MessageTypeUploadPart,
 	}
 
 	writeAtReq := proxy.WriteAtRequestHeader{
@@ -152,9 +152,9 @@ func (upw *UnreliableProxyWriter) GetResumeOffset(ctx context.Context) (int64, e
 	upw.sequenceNumber++
 
 	header := proxy.RequestHeader{
-		SequenceNumber: upw.sequenceNumber,
-		RequestType:    proxy.MessageTypeGetResumeOffset,
-		RequestSize:    0,
+		RequestUid:  upw.sequenceNumber,
+		RequestType: proxy.MessageTypeGetResumeOffset,
+		RequestSize: 0,
 	}
 
 	buf := new(bytes.Buffer)
@@ -188,9 +188,9 @@ func (upw *UnreliableProxyWriter) Abort(ctx context.Context) {
 	upw.sequenceNumber++
 
 	header := proxy.RequestHeader{
-		SequenceNumber: upw.sequenceNumber,
-		RequestType:    proxy.MessageTypeAbort,
-		RequestSize:    0,
+		RequestUid:  upw.sequenceNumber,
+		RequestType: proxy.MessageTypeAbort,
+		RequestSize: 0,
 	}
 
 	buf := new(bytes.Buffer)
