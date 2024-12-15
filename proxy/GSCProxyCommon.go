@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
+	"strings"
 )
 
 const (
@@ -20,21 +22,20 @@ type RequestHeader struct {
 }
 
 type ResponseHeader struct {
-	RequestUid    uint32
-	StatusCode    uint32
-	MessageLength uint32
+	RequestUid uint32
+	StatusCode uint32
+	DataLength uint32
 }
 
 type RequestMessage struct {
-	header       RequestHeader
-	secondHeader io.Reader
-	data         io.Reader
+	Header       RequestHeader
+	SecondHeader io.Reader
+	Data         io.Reader
 }
 
 type ResponseMessage struct {
-	header       ResponseHeader
-	secondHeader io.Reader
-	data         io.Reader
+	Header ResponseHeader
+	Data   string
 }
 
 type InitUploadSessionHeader struct {
@@ -84,17 +85,17 @@ type GetResumeOffsetRequest struct {
 }
 
 type WriteAtRequest struct {
-	RequestHeader        RequestHeader
-	WriteAtRequestHeader WriteAtHeader
-	Bucket               string
-	Object               string
-	Data                 io.Reader
+	Header        RequestHeader
+	WriteAtHeader WriteAtHeader
+	Bucket        string
+	Object        string
+	Data          io.Reader
 }
 
 func encodeString(str string) []byte {
 	length := uint32(len(str))
 	buf := new(bytes.Buffer)
-	_ = binary.Write(buf, binary.LittleEndian, length)
+	_ = binary.Write(buf, binary.BigEndian, length)
 	buf.WriteString(str)
 	return buf.Bytes()
 }
@@ -102,22 +103,19 @@ func encodeString(str string) []byte {
 func (req *WriteAtRequest) ToRequestMessage() RequestMessage {
 	buf := new(bytes.Buffer)
 
-	// Write the WriteAtRequestHeader to the buffer
-	if err := binary.Write(buf, binary.BigEndian, &req.WriteAtRequestHeader); err != nil {
+	if err := binary.Write(buf, binary.BigEndian, &req.WriteAtHeader); err != nil {
 		panic("Failed to cast to bytes[] WriteAtHeader")
 	}
 
-	// Append Bucket and Object strings
-	dataBytes := append(encodeString(req.Bucket), encodeString(req.Object)...)
+	dataBytes := req.Bucket + req.Object
 
-	// Combine all parts into the final request message
 	return RequestMessage{
-		header: RequestHeader{
-			RequestUid:  req.RequestHeader.RequestUid,
+		Header: RequestHeader{
+			RequestUid:  req.Header.RequestUid,
 			RequestType: MessageTypeUploadPart,
 		},
-		secondHeader: buf,
-		data:         io.MultiReader(bytes.NewReader(dataBytes), req.Data),
+		SecondHeader: buf,
+		Data:         io.MultiReader(strings.NewReader(dataBytes), req.Data),
 	}
 }
 
@@ -128,14 +126,14 @@ func (req *InitUploadSessionRequest) ToRequestMessage() RequestMessage {
 		panic("Failed to cast to bytes[] InitUploadSessionHeader")
 	}
 
-	dataBytes := append(encodeString(req.Bucket), encodeString(req.Object)...)
+	dataBytes := req.Bucket + req.Object
 	return RequestMessage{
-		header: RequestHeader{
+		Header: RequestHeader{
 			RequestUid:  req.Header.RequestUid,
 			RequestType: MessageTypeInitConnection,
 		},
-		secondHeader: buf,
-		data:         bytes.NewReader(dataBytes),
+		SecondHeader: buf,
+		Data:         strings.NewReader(dataBytes),
 	}
 }
 
@@ -145,14 +143,14 @@ func (req *GetResumeOffsetRequest) ToRequestMessage() RequestMessage {
 		panic("Failed to cast to bytes[] GetResumeOffsetHeader")
 	}
 
-	dataBytes := append(encodeString(req.Bucket), encodeString(req.Object)...)
+	dataBytes := req.Bucket + req.Object
 	return RequestMessage{
-		header: RequestHeader{
+		Header: RequestHeader{
 			RequestUid:  req.Header.RequestUid,
 			RequestType: MessageTypeGetResumeOffset,
 		},
-		secondHeader: buf,
-		data:         bytes.NewReader(dataBytes),
+		SecondHeader: buf,
+		Data:         strings.NewReader(dataBytes),
 	}
 }
 
@@ -162,14 +160,14 @@ func (req *AbortRequest) ToRequestMessage() RequestMessage {
 		panic("Failed to cast to bytes[] AbortHeader")
 	}
 
-	dataBytes := append(encodeString(req.Bucket), encodeString(req.Object)...)
+	dataBytes := req.Bucket + req.Object
 	return RequestMessage{
-		header: RequestHeader{
+		Header: RequestHeader{
 			RequestUid:  req.Header.RequestUid,
 			RequestType: MessageTypeAbort,
 		},
-		secondHeader: buf,
-		data:         bytes.NewReader(dataBytes),
+		SecondHeader: buf,
+		Data:         strings.NewReader(dataBytes),
 	}
 }
 
@@ -274,11 +272,11 @@ func readWriteAtRequest(header RequestHeader, reader io.Reader) (*WriteAtRequest
 	}
 
 	return &WriteAtRequest{
-		RequestHeader:        header,
-		WriteAtRequestHeader: writeHeader,
-		Bucket:               string(bucketBytes),
-		Object:               string(objectBytes),
-		Data:                 reader, // Remaining data in the reader is the payload
+		Header:        header,
+		WriteAtHeader: writeHeader,
+		Bucket:        string(bucketBytes),
+		Object:        string(objectBytes),
+		Data:          io.LimitReader(reader, writeHeader.Size), // Remaining Data in the reader is the payload
 	}, nil
 }
 
@@ -312,6 +310,7 @@ func readAbortRequest(header RequestHeader, reader io.Reader) (*AbortRequest, er
 
 func ReadRequest(reader io.Reader) (interface{}, error) {
 	header, err := readRequestHeader(reader)
+	fmt.Printf("Read 8 bytes of request header: %x\n", header)
 	if err != nil {
 		return nil, err
 	}

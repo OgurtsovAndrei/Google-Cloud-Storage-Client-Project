@@ -1,85 +1,155 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"strings"
 	"sync"
 )
 
-func (rm *RequestMessage) Read(p []byte) (n int, err error) {
-	log.Println("RequestMessage: Starting Read")
-	headerBuf := make([]byte, binary.Size(rm.header))
-	err = binary.Write(io.Discard, binary.LittleEndian, rm.header)
-	if err != nil {
-		log.Printf("RequestMessage: Error writing header: %v", err)
-		return 0, err
-	}
-	copy(p, headerBuf)
-	n += len(headerBuf)
-
-	if rm.secondHeader != nil {
-		nSecond, err := rm.secondHeader.Read(p[n:])
-		n += nSecond
-		if err != nil && err != io.EOF {
-			log.Printf("RequestMessage: Error reading secondHeader: %v", err)
-			return n, err
-		}
-		if err == io.EOF && rm.data != nil {
-			nData, err := rm.data.Read(p[n:])
-			n += nData
-			return n, err
-		}
-	}
-	if rm.data != nil {
-		nData, err := rm.data.Read(p[n:])
-		n += nData
-		return n, err
-	}
-	log.Println("RequestMessage: Finished Read with EOF")
-	return n, io.EOF
+type requestReader struct {
+	headerBuffer  *bytes.Buffer
+	secondHeader  io.Reader
+	data          io.Reader
+	currentReader io.Reader
 }
 
-func (resp *ResponseMessage) Read(p []byte) (n int, err error) {
-	log.Println("ResponseMessage: Starting Read")
-	headerBuf := make([]byte, binary.Size(resp.header))
-	err = binary.Write(io.Discard, binary.LittleEndian, resp.header)
-	if err != nil {
-		log.Printf("ResponseMessage: Error writing header: %v", err)
-		return 0, err
-	}
-	copy(p, headerBuf)
-	n += len(headerBuf)
+func NewRequestReader(req *RequestMessage) io.Reader {
+	log.Println("NewResponseReader: Create Request Reader")
 
-	if resp.secondHeader != nil {
-		nSecond, err := resp.secondHeader.Read(p[n:])
-		n += nSecond
-		if err != nil && err != io.EOF {
-			log.Printf("ResponseMessage: Error reading secondHeader: %v", err)
-			return n, err
+	headerBuf := new(bytes.Buffer)
+	_ = binary.Write(headerBuf, binary.BigEndian, req.Header)
+	return &requestReader{
+		headerBuffer:  headerBuf,
+		secondHeader:  req.SecondHeader,
+		data:          req.Data,
+		currentReader: headerBuf,
+	}
+}
+
+func (r *requestReader) Read(p []byte) (n int, err error) {
+	log.Println("RequestMessage: Starting Read")
+	for {
+		if r.currentReader == nil {
+			return n, io.EOF
 		}
-		if err == io.EOF && resp.data != nil {
-			nData, err := resp.data.Read(p[n:])
-			n += nData
+		m, err := r.currentReader.Read(p[n:])
+		log.Printf("requestReader: Read %d firs bytes: %x", m, p[n:n+min(m, 40)])
+		n += m
+		if err == io.EOF {
+			if r.currentReader == r.headerBuffer {
+				r.currentReader = r.secondHeader
+			} else if r.currentReader == r.secondHeader {
+				r.currentReader = r.data
+			} else {
+				r.currentReader = nil
+			}
+			if n > 0 {
+				return n, nil
+			}
+		} else if err != nil {
 			return n, err
+		} else {
+			return n, nil
 		}
 	}
-	if resp.data != nil {
-		nData, err := resp.data.Read(p[n:])
-		n += nData
-		return n, err
+}
+
+type responseReader struct {
+	headerBuffer  *bytes.Buffer
+	data          io.Reader
+	currentReader io.Reader
+}
+
+func NewResponseReader(resp *ResponseMessage) io.Reader {
+	log.Println("NewResponseReader: Create Response Reader")
+	headerBuf := new(bytes.Buffer)
+	_ = binary.Write(headerBuf, binary.BigEndian, resp.Header)
+	return &responseReader{
+		headerBuffer:  headerBuf,
+		data:          strings.NewReader(resp.Data),
+		currentReader: headerBuf,
 	}
-	log.Println("ResponseMessage: Finished Read with EOF")
-	return n, io.EOF
+}
+
+func (r *responseReader) Read(p []byte) (n int, err error) {
+	log.Println("Response Message: Starting Read")
+	for {
+		if r.currentReader == nil {
+			return n, io.EOF
+		}
+		m, err := r.currentReader.Read(p[n:])
+		log.Printf("responseReader: Read %d bytes: %x", m, p[n:n+m])
+		n += m
+		if err == io.EOF {
+			if r.currentReader == r.headerBuffer {
+				r.currentReader = r.data
+			} else {
+				r.currentReader = nil
+			}
+			if n > 0 {
+				return n, nil
+			}
+		} else if err != nil {
+			return n, err
+		} else {
+			return n, nil
+		}
+	}
+}
+
+func SendSuccessResponse(conn io.Writer, requestUid uint32, message string) {
+	fmt.Printf("Sending operation success response: %s\n", message)
+	respHeader := ResponseHeader{
+		RequestUid: requestUid,
+		StatusCode: 0,
+		DataLength: uint32(len(message)),
+	}
+
+	resp := ResponseMessage{
+		Header: respHeader,
+		Data:   message,
+	}
+
+	_, err := io.Copy(conn, NewResponseReader(&resp))
+	if err != nil {
+		log.Printf("Sending operation success response failed: %s\n", err)
+	}
+}
+
+func SendErrorResponse(conn io.Writer, requestUid uint32, err error) {
+	if err == nil {
+		SendSuccessResponse(conn, requestUid, "")
+		return
+	}
+
+	msg := err.Error()
+	respHeader := ResponseHeader{
+		RequestUid: requestUid,
+		StatusCode: 1,
+		DataLength: uint32(len(msg)),
+	}
+
+	resp := ResponseMessage{
+		Header: respHeader,
+		Data:   msg,
+	}
+	_, err = io.Copy(conn, NewResponseReader(&resp))
+	if err != nil {
+		log.Printf("SendErrorResponse Write Error: %s", err)
+	}
 }
 
 type ConnectionGroup struct {
 	messages       chan *RequestMessage
-	responseMap    map[uint32]chan *ResponseMessage
-	responseMapMux sync.Mutex
+	ResponseMap    map[uint32]chan *ResponseMessage
+	ResponseMapMux sync.Mutex
 	address        string
 	ctx            context.Context
 	nConnections   int
@@ -89,7 +159,7 @@ func NewConnectionGroup(bufferSize int, address string, ctx context.Context, nCo
 	log.Printf("Creating ConnectionGroup with bufferSize=%d, address=%s, nConnections=%d", bufferSize, address, nConnections)
 	cg := &ConnectionGroup{
 		messages:     make(chan *RequestMessage, bufferSize),
-		responseMap:  make(map[uint32]chan *ResponseMessage),
+		ResponseMap:  make(map[uint32]chan *ResponseMessage),
 		address:      address,
 		ctx:          ctx,
 		nConnections: nConnections,
@@ -113,7 +183,7 @@ func (cg *ConnectionGroup) createConnection() (net.Conn, error) {
 }
 
 func (cg *ConnectionGroup) readFromConn(conn net.Conn, readErrCh chan<- error) {
-	log.Println("Starting readFromConn")
+	log.Println("c")
 	for {
 		select {
 		case <-cg.ctx.Done():
@@ -122,20 +192,31 @@ func (cg *ConnectionGroup) readFromConn(conn net.Conn, readErrCh chan<- error) {
 			return
 		default:
 			var resp ResponseMessage
-			if err := binary.Read(conn, binary.LittleEndian, &resp.header); err != nil {
-				log.Printf("readFromConn: Error reading header: %v", err)
+			if err := binary.Read(conn, binary.BigEndian, &resp.Header); err != nil {
+				log.Printf("readFromConn: Error reading Header: %v", err)
 				readErrCh <- err
 				return
 			}
+			data := make([]byte, resp.Header.DataLength)
+			_, err := conn.Read(data)
 
-			cg.responseMapMux.Lock()
-			if ch, exists := cg.responseMap[resp.header.RequestUid]; exists {
-				log.Printf("readFromConn: Sending response for RequestUid=%d", resp.header.RequestUid)
+			if err != nil {
+				log.Printf("readFromConn: Error reading Data: %v", err)
+				return
+			}
+
+			resp.Data = string(data)
+			cg.ResponseMapMux.Lock()
+
+			if ch, exists := cg.ResponseMap[resp.Header.RequestUid]; exists {
+				log.Printf("readFromConn: Sending response for RequestUid=%d", resp.Header.RequestUid)
 				ch <- &resp
 				close(ch)
-				delete(cg.responseMap, resp.header.RequestUid)
+				delete(cg.ResponseMap, resp.Header.RequestUid)
+			} else {
+				log.Printf("readFromConn: RequestUid=%d not found in ResponseMap", resp.Header.RequestUid)
 			}
-			cg.responseMapMux.Unlock()
+			cg.ResponseMapMux.Unlock()
 		}
 	}
 }
@@ -145,8 +226,8 @@ func (cg *ConnectionGroup) writeToConn(conn net.Conn, writeErrCh chan<- error) {
 	for {
 		select {
 		case req := <-cg.messages:
-			log.Printf("writeToConn: Sending request for RequestUid=%d", req.header.RequestUid)
-			if _, err := io.Copy(conn, req); err != nil {
+			log.Printf("writeToConn: Sending request for RequestUid=%d", req.Header.RequestUid)
+			if _, err := io.Copy(conn, NewRequestReader(req)); err != nil {
 				log.Printf("writeToConn: Error writing request: %v", err)
 				writeErrCh <- err
 				return
@@ -188,19 +269,34 @@ func (cg *ConnectionGroup) handleConnection() error {
 }
 
 func (cg *ConnectionGroup) SendMessage(ctx context.Context, msg *RequestMessage) error {
-	log.Printf("SendMessage: Sending message with RequestUid=%d", msg.header.RequestUid)
+	log.Printf("SendMessage: Sending message with RequestUid=%d", msg.Header.RequestUid)
 	select {
 	case cg.messages <- msg:
-		cg.responseMapMux.Lock()
-		if _, exists := cg.responseMap[msg.header.RequestUid]; !exists {
-			log.Printf("SendMessage: Creating response channel for RequestUid=%d", msg.header.RequestUid)
-			cg.responseMap[msg.header.RequestUid] = make(chan *ResponseMessage, 1)
+		cg.ResponseMapMux.Lock()
+		if _, exists := cg.ResponseMap[msg.Header.RequestUid]; !exists {
+			log.Printf("SendMessage: Creating response channel for RequestUid=%d", msg.Header.RequestUid)
+			cg.ResponseMap[msg.Header.RequestUid] = make(chan *ResponseMessage, 1)
 		}
-		cg.responseMapMux.Unlock()
+		cg.ResponseMapMux.Unlock()
 		return nil
 	case <-ctx.Done():
 		log.Println("SendMessage: Context canceled")
 		return ctx.Err()
+	}
+}
+
+func (cg *ConnectionGroup) WaitResponse(ctx context.Context, requestUid uint32) (*ResponseMessage, error) {
+	cg.ResponseMapMux.Lock()
+	ch, exists := cg.ResponseMap[requestUid]
+	cg.ResponseMapMux.Unlock()
+	if !exists {
+		return nil, errors.New("response channel not found")
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case resp := <-ch:
+		return resp, nil
 	}
 }
 
