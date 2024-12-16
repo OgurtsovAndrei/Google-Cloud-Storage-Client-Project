@@ -1,6 +1,7 @@
 package main
 
 import (
+	"awesomeProject/proxy"
 	"awesomeProject/writers"
 	"context"
 	"fmt"
@@ -25,17 +26,15 @@ func main() {
 	defer cancel()
 
 	go func() {
-		if err := startGCSProxyServer(ctx, listenAddress); err != nil {
-			fmt.Printf("Failed to start GCSProxyServer: %v\n", err)
-			cancel()
-		}
+		_ = proxy.NewGcsProxyServer(ctx, listenAddress)
 	}()
 
 	time.Sleep(1 * time.Second)
 
 	//unreliableWriter, err := writers.NewUnreliableLocalWriter(fileName)
 	//unreliableWriter, err := writers.NewUnreliableGCSWriter(ctx, bucket, fileName)
-	unreliableWriter, err := writers.NewUnreliableProxyWriter("localhost"+listenAddress, bucket, fileName)
+	cg := proxy.NewConnectionGroup(10, "localhost"+listenAddress, ctx, 2)
+	unreliableWriter, err := writers.NewUnreliableProxyWriter(ctx, cg, bucket, fileName)
 	if err != nil {
 		fmt.Println("Failed to create UnreliableProxyWriter:", err)
 		return

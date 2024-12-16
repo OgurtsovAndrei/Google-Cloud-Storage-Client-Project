@@ -1,202 +1,159 @@
 package writers
 
 import (
-	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
-	"fmt"
 	"io"
-	"net"
-	"time"
+	"log"
+	"strings"
+	"sync/atomic"
+
+	"awesomeProject/proxy"
 )
 
 type UnreliableProxyWriter struct {
-	connection     net.Conn
-	bucket         string
-	objectName     string
-	currentOffset  int64
-	isAborted      bool
-	sequenceNumber uint32
+	cg     *proxy.ConnectionGroup
+	bucket string
+	object string
+	uid    uint32
 }
 
-func NewUnreliableProxyWriter(proxyAddress, bucket, objectName string) (*UnreliableProxyWriter, error) {
-	conn, err := net.Dial("tcp", proxyAddress)
+func NewUnreliableProxyWriter(ctx context.Context, cg *proxy.ConnectionGroup, bucket, object string) (*UnreliableProxyWriter, error) {
+	w := &UnreliableProxyWriter{
+		cg:     cg,
+		bucket: bucket,
+		object: object,
+	}
+	req := &proxy.InitUploadSessionRequest{
+		Header: proxy.RequestHeader{
+			RequestUid:  atomic.AddUint32(&w.uid, 1),
+			RequestType: proxy.MessageTypeInitConnection,
+		},
+		InitUploadSessionHeader: proxy.InitUploadSessionHeader{
+			BucketNameLength: uint32(len(bucket)),
+			ObjectNameLength: uint32(len(object)),
+		},
+		Bucket: bucket,
+		Object: object,
+	}
+	msg := req.ToRequestMessage()
+	log.Printf("Sending init connetction message...")
+	if err := cg.SendMessage(ctx, &msg); err != nil {
+		return nil, err
+	}
+	log.Printf("Waiting for init connetction response...")
+	resp, err := w.cg.WaitResponse(ctx, req.Header.RequestUid)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to GCSProxyServer: %w", err)
+		return nil, err
 	}
-
-	upw := &UnreliableProxyWriter{
-		connection:     conn,
-		bucket:         bucket,
-		objectName:     objectName,
-		currentOffset:  0,
-		isAborted:      false,
-		sequenceNumber: 0,
+	if resp.Header.StatusCode != 0 {
+		return nil, errors.New("failed to initialize upload session")
 	}
-
-	if err := upw.sendInitConnectionRequest(); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("failed to initialize connection: %w", err)
-	}
-
-	return upw, nil
+	return w, nil
 }
 
-func (upw *UnreliableProxyWriter) sendInitConnectionRequest() error {
-	upw.sequenceNumber++
-	header := RequestHeader{
-		SequenceNumber: upw.sequenceNumber,
-		RequestType:    MessageTypeInitConnection,
+func (w *UnreliableProxyWriter) WriteAt(ctx context.Context, chunkBegin, chunkEnd int64, reader *ScatterGatherBuffer, isLast bool) (int64, error) {
+	var maxPartSize uint32 = 1 * 1024 * 1024
+	parts := reader.SplitByParts(maxPartSize)
+	requestId := atomic.AddUint32(&w.uid, 1)
+
+	var off int64 = chunkBegin
+	for _, part := range parts {
+		req := &proxy.WriteAtRequest{
+			Header: proxy.RequestHeader{
+				RequestUid:  requestId,
+				RequestType: proxy.MessageTypeUploadPart,
+			},
+			WriteAtHeader: proxy.WriteAtHeader{
+				BucketNameLength: uint32(len(w.bucket)),
+				ObjectNameLength: uint32(len(w.object)),
+				ChunkBegin:       chunkBegin,
+				ChunkEnd:         chunkEnd,
+				Off:              off,
+				Size:             int64(part.size),
+				IsLast:           boolToByte(isLast),
+			},
+			Bucket: w.bucket,
+			Object: w.object,
+			Data:   part,
+		}
+
+		off += int64(part.size)
+		message := req.ToRequestMessage()
+		if err := w.cg.SendMessage(ctx, &message); err != nil {
+			return 0, err
+		}
 	}
 
-	bucketNameBytes := []byte(upw.bucket)
-	objectNameBytes := []byte(upw.objectName)
-
-	initReq := InitConnectionRequestHeader{
-		BucketNameLength: uint32(len(bucketNameBytes)),
-		ObjectNameLength: uint32(len(objectNameBytes)),
-	}
-
-	reqSize := binary.Size(initReq) + len(bucketNameBytes) + len(objectNameBytes)
-	header.RequestSize = uint32(reqSize)
-
-	buf := new(bytes.Buffer)
-	if err := binary.Write(buf, binary.BigEndian, &header); err != nil {
-		return fmt.Errorf("failed to write request header: %w", err)
-	}
-	if err := binary.Write(buf, binary.BigEndian, &initReq); err != nil {
-		return fmt.Errorf("failed to write InitConnectionRequestHeader: %w", err)
-	}
-	buf.Write(bucketNameBytes)
-	buf.Write(objectNameBytes)
-
-	if _, err := upw.connection.Write(buf.Bytes()); err != nil {
-		return fmt.Errorf("failed to send init connection request: %w", err)
-	}
-
-	return nil
-}
-
-func (upw *UnreliableProxyWriter) WriteAt(ctx context.Context, chunkBegin, chunkEnd int64, reader io.Reader, isLast bool) (int64, error) {
-	if upw.isAborted {
-		return 0, errors.New("operation aborted")
-	}
-	if chunkBegin != upw.currentOffset {
-		msg := fmt.Sprintf("WriteAt called on chunkBegin %d, but currentOffset is %d", chunkBegin, upw.currentOffset)
-		fmt.Println(msg)
-		return 0, errors.New(msg)
-	}
-	size := chunkEnd - chunkBegin
-	if size <= 0 {
-		return 0, errors.New("invalid chunk size")
-	}
-
-	upw.sequenceNumber++
-
-	header := RequestHeader{
-		SequenceNumber: upw.sequenceNumber,
-		RequestType:    MessageTypeUploadPart,
-	}
-
-	writeAtReq := WriteAtRequestHeader{
-		ChunkBegin: chunkBegin,
-		ChunkEnd:   chunkEnd,
-		IsLast:     boolToByte(isLast),
-	}
-
-	reqSize := binary.Size(writeAtReq) + int(size)
-	header.RequestSize = uint32(reqSize)
-
-	buf := new(bytes.Buffer)
-	if err := binary.Write(buf, binary.BigEndian, &header); err != nil {
-		upw.currentOffset = chunkBegin
-		return 0, fmt.Errorf("failed to write request header: %w", err)
-	}
-	if err := binary.Write(buf, binary.BigEndian, &writeAtReq); err != nil {
-		upw.currentOffset = chunkBegin
-		return 0, fmt.Errorf("failed to write WriteAtRequestHeader: %w", err)
-	}
-
-	conn := upw.connection
-	if _, err := conn.Write(buf.Bytes()); err != nil {
-		upw.currentOffset = chunkBegin
-		return 0, fmt.Errorf("failed to write request metadata: %w", err)
-	}
-
-	startTime := time.Now()
-	n, err := io.CopyN(conn, reader, size)
+	resp, err := w.cg.WaitResponse(ctx, requestId)
 	if err != nil {
-		upw.currentOffset = chunkBegin
-		return n, fmt.Errorf("failed to write data: %w", err)
+		return 0, err
 	}
-	elapsedTime := time.Since(startTime)
-	uploadSpeed := float64(n) / elapsedTime.Seconds()
-	fmt.Printf("Sent chunk to TCP [%d - %d] (%d bytes) in %.2f seconds (%.2f MB/s)\n",
-		chunkBegin, chunkEnd, n, elapsedTime.Seconds(), uploadSpeed/(1024*1024))
-
-	upw.currentOffset = chunkEnd
-	return n, nil
+	if resp.Header.StatusCode != 0 {
+		return 0, errors.New("failed to write data to proxy")
+	}
+	return chunkEnd - chunkBegin, nil
 }
 
-func (upw *UnreliableProxyWriter) GetResumeOffset(ctx context.Context) (int64, error) {
-	if upw.isAborted {
-		return 0, errors.New("operation aborted")
+func (w *UnreliableProxyWriter) GetResumeOffset(ctx context.Context) (int64, error) {
+	req := &proxy.GetResumeOffsetRequest{
+		Header: proxy.RequestHeader{
+			RequestUid:  atomic.AddUint32(&w.uid, 1),
+			RequestType: proxy.MessageTypeGetResumeOffset,
+		},
+		GetResumeOffsetHeader: proxy.GetResumeOffsetHeader{
+			BucketNameLength: uint32(len(w.bucket)),
+			ObjectNameLength: uint32(len(w.object)),
+		},
+		Bucket: w.bucket,
+		Object: w.object,
 	}
-	upw.sequenceNumber++
-
-	header := RequestHeader{
-		SequenceNumber: upw.sequenceNumber,
-		RequestType:    MessageTypeGetResumeOffset,
-		RequestSize:    0,
+	message := req.ToRequestMessage()
+	if err := w.cg.SendMessage(ctx, &message); err != nil {
+		return 0, err
 	}
-
-	buf := new(bytes.Buffer)
-	if err := binary.Write(buf, binary.BigEndian, &header); err != nil {
-		return 0, fmt.Errorf("failed to write request header: %w", err)
+	resp, err := w.cg.WaitResponse(ctx, req.Header.RequestUid)
+	if err != nil {
+		return 0, err
 	}
-
-	conn := upw.connection
-	if _, err := conn.Write(buf.Bytes()); err != nil {
-		return 0, fmt.Errorf("failed to write GetResumeOffset request: %w", err)
+	if resp.Header.StatusCode != 0 {
+		return 0, errors.New("failed to get resume offset")
 	}
-
-	var resumeOffset int64
-	if err := binary.Read(conn, binary.BigEndian, &resumeOffset); err != nil {
-		return 0, fmt.Errorf("failed to read resume offset: %w", err)
-	}
-
-	upw.currentOffset = resumeOffset
-	return resumeOffset, nil
+	return parseOffset(strings.NewReader(resp.Data))
 }
 
-func (upw *UnreliableProxyWriter) Abort(ctx context.Context) {
-	if upw.isAborted {
-		return
+func (w *UnreliableProxyWriter) Abort(ctx context.Context) {
+	req := &proxy.AbortRequest{
+		Header: proxy.RequestHeader{
+			RequestUid:  atomic.AddUint32(&w.uid, 1),
+			RequestType: proxy.MessageTypeAbort,
+		},
+		AbortHeader: proxy.AbortHeader{
+			BucketNameLength: uint32(len(w.bucket)),
+			ObjectNameLength: uint32(len(w.object)),
+		},
+		Bucket: w.bucket,
+		Object: w.object,
 	}
-	upw.isAborted = true
-	upw.sequenceNumber++
-
-	header := RequestHeader{
-		SequenceNumber: upw.sequenceNumber,
-		RequestType:    MessageTypeAbort,
-		RequestSize:    0,
-	}
-
-	buf := new(bytes.Buffer)
-	if err := binary.Write(buf, binary.BigEndian, &header); err != nil {
-		fmt.Println("Error writing abort request header:", err)
-		return
-	}
-
-	conn := upw.connection
-	if _, err := conn.Write(buf.Bytes()); err != nil {
-		fmt.Println("Error sending abort request:", err)
-	}
+	message := req.ToRequestMessage()
+	_ = w.cg.SendMessage(ctx, &message)
+	_, _ = w.cg.WaitResponse(ctx, req.Header.RequestUid)
 }
 
-func boolToByte(b bool) byte {
-	if b {
+func parseOffset(data io.Reader) (int64, error) {
+	var offset int64
+	buf := make([]byte, 8)
+	if _, err := data.Read(buf); err != nil {
+		return 0, err
+	}
+	for _, b := range buf {
+		offset = offset*10 + int64(b-'0')
+	}
+	return offset, nil
+}
+
+func boolToByte(val bool) byte {
+	if val {
 		return 1
 	}
 	return 0

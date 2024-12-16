@@ -144,6 +144,7 @@ func (rw *ReliableWriterImpl) Complete(ctx context.Context) error {
 }
 
 func (rw *ReliableWriterImpl) Abort(ctx context.Context) {
+	fmt.Println("Aborting write operation...")
 	rw.unreliableWriter.Abort(ctx)
 	rw.mutex.Lock()
 	rw.isComplete = false
@@ -236,7 +237,7 @@ func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf *
 	var totalWritten int64 = 0
 
 	for attempt := 0; attempt < 3; attempt++ {
-		reader := buf.GetPipeReader()
+		reader := buf
 
 		written, err := rw.unreliableWriter.WriteAt(ctx, chunkBegin+totalWritten, chunkEnd, reader, isLast)
 		totalWritten += written
