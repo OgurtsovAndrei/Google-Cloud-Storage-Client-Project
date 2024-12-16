@@ -52,37 +52,47 @@ func NewUnreliableProxyWriter(ctx context.Context, cg *proxy.ConnectionGroup, bu
 	return w, nil
 }
 
-func (w *UnreliableProxyWriter) WriteAt(ctx context.Context, chunkBegin, chunkEnd int64, reader io.Reader, isLast bool) (int64, error) {
-	req := &proxy.WriteAtRequest{
-		Header: proxy.RequestHeader{
-			RequestUid:  atomic.AddUint32(&w.uid, 1),
-			RequestType: proxy.MessageTypeUploadPart,
-		},
-		WriteAtHeader: proxy.WriteAtHeader{
-			BucketNameLength: uint32(len(w.bucket)),
-			ObjectNameLength: uint32(len(w.object)),
-			ChunkBegin:       chunkBegin,
-			ChunkEnd:         chunkEnd,
-			Off:              chunkBegin,
-			Size:             int64(chunkEnd - chunkBegin),
-			IsLast:           boolToByte(isLast),
-		},
-		Bucket: w.bucket,
-		Object: w.object,
-		Data:   reader,
+func (w *UnreliableProxyWriter) WriteAt(ctx context.Context, chunkBegin, chunkEnd int64, reader *ScatterGatherBuffer, isLast bool) (int64, error) {
+	var maxPartSize uint32 = 1 * 1024 * 1024
+	parts := reader.SplitByParts(maxPartSize)
+	requestId := atomic.AddUint32(&w.uid, 1)
+
+	var off int64 = chunkBegin
+	for _, part := range parts {
+		req := &proxy.WriteAtRequest{
+			Header: proxy.RequestHeader{
+				RequestUid:  requestId,
+				RequestType: proxy.MessageTypeUploadPart,
+			},
+			WriteAtHeader: proxy.WriteAtHeader{
+				BucketNameLength: uint32(len(w.bucket)),
+				ObjectNameLength: uint32(len(w.object)),
+				ChunkBegin:       chunkBegin,
+				ChunkEnd:         chunkEnd,
+				Off:              off,
+				Size:             int64(part.size),
+				IsLast:           boolToByte(isLast),
+			},
+			Bucket: w.bucket,
+			Object: w.object,
+			Data:   part,
+		}
+
+		off += int64(part.size)
+		message := req.ToRequestMessage()
+		if err := w.cg.SendMessage(ctx, &message); err != nil {
+			return 0, err
+		}
 	}
-	message := req.ToRequestMessage()
-	if err := w.cg.SendMessage(ctx, &message); err != nil {
-		return 0, err
-	}
-	resp, err := w.cg.WaitResponse(ctx, req.Header.RequestUid)
+
+	resp, err := w.cg.WaitResponse(ctx, requestId)
 	if err != nil {
 		return 0, err
 	}
 	if resp.Header.StatusCode != 0 {
 		return 0, errors.New("failed to write data to proxy")
 	}
-	return int64(chunkEnd - chunkBegin), nil
+	return chunkEnd - chunkBegin, nil
 }
 
 func (w *UnreliableProxyWriter) GetResumeOffset(ctx context.Context) (int64, error) {
