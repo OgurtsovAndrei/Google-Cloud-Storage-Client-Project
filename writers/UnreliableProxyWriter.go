@@ -81,7 +81,7 @@ func (w *UnreliableProxyWriter) WriteAt(
 	chunkBegin, chunkEnd int64,
 	reader *ScatterGatherBuffer,
 	isLast bool,
-) (int64, error) {
+) (int64, *utils.Error) {
 
 	var maxPartSize uint32 = 1 * 1024 * 1024
 	parts := reader.SplitByParts(maxPartSize)
@@ -111,39 +111,29 @@ func (w *UnreliableProxyWriter) WriteAt(
 		off += int64(part.size)
 		message := req.ToRequestMessage()
 
-		if err := w.cg.SendMessage(ctx, &message); err != nil {
-			// Potentially TagNetwork, TagRetryable
-			return 0, &utils.Error{
-				Code:  utils.ErrCodeSendMessage,
-				Msg:   "Failed to send write-part message",
-				Cause: err,
-				Tags:  []string{utils.TagNetwork, utils.TagRetryable},
-			}
+		err := w.cg.SendMessage(ctx, &message)
+		if err != nil {
+			return 0, err
 		}
 	}
 
 	resp, err := w.cg.WaitResponse(ctx, requestId)
 	if err != nil {
-		return 0, &utils.Error{
-			Code:  utils.ErrCodeWaitResponse,
-			Msg:   "Failed to receive WriteAt response",
-			Cause: err,
-			Tags:  []string{utils.TagNetwork, utils.TagRetryable},
-		}
+		return 0, err
 	}
 
-	if resp.Header.StatusCode != 0 {
-		return 0, &utils.Error{
-			Code: utils.ErrCodeWriteAtFailed,
-			Msg:  "Server responded with a failure for WriteAt",
-			Tags: []string{utils.TagOutOfOrder}, // or TagIllegalArgument, depends
+	if resp.IsErr() {
+		customErr, convErr := resp.AsErr()
+		if convErr == nil {
+			return 0, customErr
 		}
+		return 0, convErr
 	}
 
 	return chunkEnd - chunkBegin, nil
 }
 
-func (w *UnreliableProxyWriter) GetResumeOffset(ctx context.Context) (int64, error) {
+func (w *UnreliableProxyWriter) GetResumeOffset(ctx context.Context) (int64, *utils.Error) {
 	req := &proxy.GetResumeOffsetRequest{
 		Header: proxy.RequestHeader{
 			RequestUid:  atomic.AddUint32(&w.uid, 1),
@@ -182,12 +172,7 @@ func (w *UnreliableProxyWriter) GetResumeOffset(ctx context.Context) (int64, err
 		if convErr == nil {
 			return 0, customErr
 		}
-		return 0, &utils.Error{
-			Code:  utils.ErrCodeGetResume,
-			Msg:   "Failed to deserialize server error response",
-			Cause: convErr,
-			Tags:  []string{utils.TagInternal},
-		}
+		return 0, convErr
 	}
 
 	off, parseErr := parseOffset(strings.NewReader(resp.Data))
@@ -217,7 +202,7 @@ func (w *UnreliableProxyWriter) Abort(ctx context.Context) {
 	_, _ = w.cg.WaitResponse(ctx, req.Header.RequestUid)
 }
 
-func parseOffset(data io.Reader) (int64, error) {
+func parseOffset(data io.Reader) (int64, *utils.Error) {
 	var offset int64
 	buf := make([]byte, 8)
 	if _, err := data.Read(buf); err != nil {

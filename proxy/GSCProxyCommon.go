@@ -547,14 +547,24 @@ func (resp *ResponseMessage) IsErr() bool {
 }
 
 // AsErr deserializes the ResponseMessage into a utils.Error if it represents an error.
-func (resp *ResponseMessage) AsErr() (*utils.Error, error) {
+func (resp *ResponseMessage) AsErr() (*utils.Error, *utils.Error) {
 	if !resp.IsErr() {
-		return nil, errors.New("response does not represent an error")
+		return nil, &utils.Error{
+			Code:  utils.InvalidArgumentError,
+			Msg:   fmt.Sprintf("invalid response message cast: %s", resp.Data),
+			Cause: fmt.Errorf("invalid response message cast"),
+			Tags:  []string{utils.TagInternal},
+		}
 	}
 
 	customErr, err := utils.FromJSON(resp.Data)
 	if err != nil {
-		return nil, fmt.Errorf("failed to deserialize error data: %w", err)
+		return nil, &utils.Error{
+			Code:  utils.ErrCastFailed,
+			Msg:   fmt.Sprintf("Server response message cast failed, msg: %s", resp.Data),
+			Cause: nil,
+			Tags:  nil,
+		}
 	}
 
 	return customErr, nil

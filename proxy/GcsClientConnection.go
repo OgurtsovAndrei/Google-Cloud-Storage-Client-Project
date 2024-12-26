@@ -157,7 +157,7 @@ func (cg *ClientConnectionGroup) dispatchResponse(resp *ResponseMessage) {
 	delete(cg.responseMap, resp.Header.RequestUid)
 }
 
-func (cg *ClientConnectionGroup) SendMessage(ctx context.Context, msg *RequestMessage) error {
+func (cg *ClientConnectionGroup) SendMessage(ctx context.Context, msg *RequestMessage) *utils.Error {
 	log.Printf("SendMessage: Sending message with RequestUid=%d", msg.Header.RequestUid)
 	select {
 	case cg.messages <- msg:
@@ -174,7 +174,7 @@ func (cg *ClientConnectionGroup) SendMessage(ctx context.Context, msg *RequestMe
 	}
 }
 
-func (cg *ClientConnectionGroup) WaitResponse(ctx context.Context, requestUid uint32) (*ResponseMessage, error) {
+func (cg *ClientConnectionGroup) WaitResponse(ctx context.Context, requestUid uint32) (*ResponseMessage, *utils.Error) {
 	cg.responseMapMutex.Lock()
 	ch, exists := cg.responseMap[requestUid]
 	cg.responseMapMutex.Unlock()

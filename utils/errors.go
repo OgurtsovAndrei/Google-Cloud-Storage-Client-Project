@@ -51,6 +51,11 @@ const (
 	ErrCodeNotFound           = "SRV006" // Connection upload session not found
 )
 
+const (
+	ErrCastFailed        = "CastFailed"
+	InvalidArgumentError = "InvalidArgumentError"
+)
+
 // Error represents a custom error with tags
 type Error struct {
 	Code  string   `json:"code"`
