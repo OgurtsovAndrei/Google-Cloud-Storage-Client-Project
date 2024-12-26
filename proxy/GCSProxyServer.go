@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"sync"
 	"time"
 
@@ -46,8 +45,8 @@ func NewGcsProxyServer(ctx context.Context, address string) *GcsProxyServer {
 		uploadSessions: make(map[string]*UploadSession),
 		ctx:            ctx,
 	}
-	connectionGroup, err := NewServerConnectionGroup(address, ctx, func(ctx context.Context, r interface{}, conn net.Conn) error {
-		return proxy.handleRequest(ctx, r, conn)
+	connectionGroup, err := NewServerConnectionGroup(address, ctx, func(ctx context.Context, r interface{}, connections *ClientConnectionPool) error {
+		return proxy.handleRequest(ctx, r, connections)
 	})
 	if err != nil {
 		panic(err)
@@ -56,32 +55,37 @@ func NewGcsProxyServer(ctx context.Context, address string) *GcsProxyServer {
 	return &proxy
 }
 
-func (proxyServer *GcsProxyServer) handleRequest(ctx context.Context, r interface{}, respondConn io.Writer) error {
+func (proxyServer *GcsProxyServer) handleRequest(ctx context.Context, r interface{}, connections *ClientConnectionPool) error {
 	switch req := r.(type) {
 	case *InitUploadSessionRequest:
 		fmt.Println("Processing InitUploadSessionRequest:", req)
 		err := handleInitUploadSession(ctx, &proxyServer.uploadSessions, &proxyServer.mutex, *req)
 		if err != nil {
-			SendErrorResponse(respondConn, req.Header.RequestUid, err)
+			resp := BuildErrorResponse(req.Header.RequestUid, err)
+			connections.SendMessage(ctx, resp)
 			return err
 		}
-		SendSuccessResponse(respondConn, req.Header.RequestUid, fmt.Sprintf("OK"))
+		resp := BuildSucceedResponse(req.Header.RequestUid, fmt.Sprintf("OK"))
+		connections.SendMessage(ctx, &resp)
 		return nil
 	case *GetResumeOffsetRequest:
 		fmt.Println("Processing GetResumeOffsetRequest:", req)
 		off, err := handleGetResumeOffset(&proxyServer.uploadSessions, &proxyServer.mutex, req)
 		if err != nil {
-			SendErrorResponse(respondConn, req.Header.RequestUid, err)
+			resp := BuildErrorResponse(req.Header.RequestUid, err)
+			connections.SendMessage(ctx, resp)
 			return err
 		}
-		SendSuccessResponse(respondConn, req.Header.RequestUid, fmt.Sprintf("%d", off))
+		resp := BuildSucceedResponse(req.Header.RequestUid, fmt.Sprintf("%d", off))
+		connections.SendMessage(ctx, &resp)
 		return nil
 	case *WriteAtRequest:
 		fmt.Println("Processing WriteAtRequest:", req)
-		err := handleWriteAt(proxyServer.ctx, respondConn, &proxyServer.uploadSessions, &proxyServer.mutex, req)
+		err := handleWriteAt(proxyServer.ctx, connections, &proxyServer.uploadSessions, &proxyServer.mutex, req)
 		if err != nil {
 			fmt.Println("Error processing WriteAtRequest:", err)
-			SendErrorResponse(respondConn, req.Header.RequestUid, err)
+			resp := BuildErrorResponse(req.Header.RequestUid, err)
+			connections.SendMessage(ctx, resp)
 			return err
 		}
 		return nil
@@ -89,10 +93,12 @@ func (proxyServer *GcsProxyServer) handleRequest(ctx context.Context, r interfac
 		fmt.Println("Processing AbortRequest:", req)
 		err := handleAbort(&proxyServer.uploadSessions, &proxyServer.mutex, req)
 		if err != nil {
-			SendErrorResponse(respondConn, req.Header.RequestUid, err)
+			resp := BuildErrorResponse(req.Header.RequestUid, err)
+			connections.SendMessage(ctx, resp)
 			return err
 		}
-		SendSuccessResponse(respondConn, req.Header.RequestUid, fmt.Sprintf("OK"))
+		resp := BuildSucceedResponse(req.Header.RequestUid, fmt.Sprintf("OK"))
+		connections.SendMessage(ctx, &resp)
 		return nil
 	default:
 		return &utils.Error{
@@ -180,7 +186,7 @@ func onSessionFinishedGoroutine(ctx context.Context, uploadSessionsMutex *sync.M
 	}()
 }
 
-func handleWriteAt(ctx context.Context, respondConn io.Writer, uploadSessions *map[string]*UploadSession, uploadSessionsMutex *sync.Mutex, header *WriteAtRequest) error {
+func handleWriteAt(ctx context.Context, connections *ClientConnectionPool, uploadSessions *map[string]*UploadSession, uploadSessionsMutex *sync.Mutex, header *WriteAtRequest) error {
 	session, err := getSession(uploadSessions, uploadSessionsMutex, header)
 	if err != nil {
 		return err
@@ -191,7 +197,7 @@ func handleWriteAt(ctx context.Context, respondConn io.Writer, uploadSessions *m
 	}
 
 	if session.currentChunk == nil {
-		return handleNewChunk(ctx, respondConn, session, header)
+		return handleNewChunk(ctx, connections, session, header)
 	}
 
 	return handleExistingChunk(session, header)
@@ -233,7 +239,7 @@ func validateSessionState(session *UploadSession, header *WriteAtRequest) error 
 	return nil
 }
 
-func handleNewChunk(ctx context.Context, respondConn io.Writer, session *UploadSession, header *WriteAtRequest) error {
+func handleNewChunk(ctx context.Context, connections *ClientConnectionPool, session *UploadSession, header *WriteAtRequest) error {
 	session.chunkLock.Lock()
 	defer session.chunkLock.Unlock()
 
@@ -265,10 +271,12 @@ func handleNewChunk(ctx context.Context, respondConn io.Writer, session *UploadS
 				Cause: err,
 				Tags:  []string{utils.TagInternal},
 			}
-			SendErrorResponse(respondConn, header.Header.RequestUid, customErr)
+			resp := BuildErrorResponse(header.Header.RequestUid, customErr)
+			connections.SendMessage(ctx, resp)
 			return
 		}
-		SendSuccessResponse(respondConn, header.Header.RequestUid, "OK")
+		resp := BuildSucceedResponse(header.Header.RequestUid, fmt.Sprintf("OK"))
+		connections.SendMessage(ctx, &resp)
 	}()
 
 	return nil

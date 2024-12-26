@@ -1,21 +1,18 @@
 package writers
 
 import (
+	"awesomeProject/proxy"
+	"awesomeProject/utils"
 	"context"
 	"io"
 	"log"
 	"strings"
-	"sync/atomic"
-
-	"awesomeProject/proxy"
-	"awesomeProject/utils"
 )
 
 type UnreliableProxyWriter struct {
 	cg     *proxy.ClientConnectionGroup
 	bucket string
 	object string
-	uid    uint32
 }
 
 func NewUnreliableProxyWriter(ctx context.Context, cg *proxy.ClientConnectionGroup, bucket, object string) (*UnreliableProxyWriter, error) {
@@ -27,7 +24,7 @@ func NewUnreliableProxyWriter(ctx context.Context, cg *proxy.ClientConnectionGro
 
 	req := &proxy.InitUploadSessionRequest{
 		Header: proxy.RequestHeader{
-			RequestUid:  atomic.AddUint32(&w.uid, 1),
+			RequestUid:  cg.NextUid(),
 			RequestType: proxy.MessageTypeInitConnection,
 		},
 		InitUploadSessionHeader: proxy.InitUploadSessionHeader{
@@ -85,7 +82,7 @@ func (w *UnreliableProxyWriter) WriteAt(
 
 	var maxPartSize uint32 = 1 * 1024 * 1024
 	parts := reader.SplitByParts(maxPartSize)
-	requestId := atomic.AddUint32(&w.uid, 1)
+	requestId := w.cg.NextUid()
 
 	var off int64 = chunkBegin
 	for _, part := range parts {
@@ -136,7 +133,7 @@ func (w *UnreliableProxyWriter) WriteAt(
 func (w *UnreliableProxyWriter) GetResumeOffset(ctx context.Context) (int64, *utils.Error) {
 	req := &proxy.GetResumeOffsetRequest{
 		Header: proxy.RequestHeader{
-			RequestUid:  atomic.AddUint32(&w.uid, 1),
+			RequestUid:  w.cg.NextUid(),
 			RequestType: proxy.MessageTypeGetResumeOffset,
 		},
 		GetResumeOffsetHeader: proxy.GetResumeOffsetHeader{
@@ -186,7 +183,7 @@ func (w *UnreliableProxyWriter) GetResumeOffset(ctx context.Context) (int64, *ut
 func (w *UnreliableProxyWriter) Abort(ctx context.Context) {
 	req := &proxy.AbortRequest{
 		Header: proxy.RequestHeader{
-			RequestUid:  atomic.AddUint32(&w.uid, 1),
+			RequestUid:  w.cg.NextUid(),
 			RequestType: proxy.MessageTypeAbort,
 		},
 		AbortHeader: proxy.AbortHeader{

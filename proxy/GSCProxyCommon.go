@@ -16,6 +16,7 @@ const (
 	MessageTypeUploadPart      = 1
 	MessageTypeGetResumeOffset = 2
 	MessageTypeAbort           = 3
+	MessageTypeHandshake       = 4
 )
 
 type RequestHeader struct {
@@ -38,6 +39,16 @@ type RequestMessage struct {
 type ResponseMessage struct {
 	Header ResponseHeader
 	Data   string
+}
+
+type HandshakeHeader struct {
+	ClientIDLength uint32
+}
+
+type HandshakeRequest struct {
+	Header          RequestHeader
+	HandshakeHeader HandshakeHeader
+	ClientID        string
 }
 
 type InitUploadSessionHeader struct {
@@ -173,18 +184,22 @@ func (req *AbortRequest) ToRequestMessage() RequestMessage {
 	}
 }
 
-func RequestTypeToString(requestType uint32) string {
-	switch requestType {
-	case MessageTypeInitConnection:
-		return "InitConnection"
-	case MessageTypeUploadPart:
-		return "UploadPart"
-	case MessageTypeGetResumeOffset:
-		return "GetResumeOffset"
-	case MessageTypeAbort:
-		return "Abort"
-	default:
-		return "Unknown"
+func (req *HandshakeRequest) ToRequestMessage() RequestMessage {
+	buf := new(bytes.Buffer)
+
+	if err := binary.Write(buf, binary.BigEndian, &req.HandshakeHeader); err != nil {
+		panic("Failed to cast to bytes[] HandshakeHeader")
+	}
+
+	dataBytes := req.ClientID
+
+	return RequestMessage{
+		Header: RequestHeader{
+			RequestUid:  req.Header.RequestUid,
+			RequestType: MessageTypeHandshake,
+		},
+		SecondHeader: buf,
+		Data:         strings.NewReader(dataBytes),
 	}
 }
 
@@ -306,6 +321,28 @@ func readAbortRequest(header RequestHeader, reader io.Reader) (*AbortRequest, er
 	}, nil
 }
 
+func readHandshakeRequest(header RequestHeader, reader io.Reader) (*HandshakeRequest, error) {
+	if header.RequestType != MessageTypeHandshake {
+		return nil, errors.New("incorrect request type for HandshakeRequest")
+	}
+
+	var handshakeHeader HandshakeHeader
+	if err := binary.Read(reader, binary.BigEndian, &handshakeHeader); err != nil {
+		return nil, err
+	}
+
+	clientIDBytes := make([]byte, handshakeHeader.ClientIDLength)
+	if _, err := io.ReadFull(reader, clientIDBytes); err != nil {
+		return nil, err
+	}
+
+	return &HandshakeRequest{
+		Header:          header,
+		HandshakeHeader: handshakeHeader,
+		ClientID:        string(clientIDBytes),
+	}, nil
+}
+
 func ReadRequest(reader io.Reader) (interface{}, error) {
 	header, err := readRequestHeader(reader)
 	fmt.Printf("Read 8 bytes of request header: %x\n", header)
@@ -322,8 +359,18 @@ func ReadRequest(reader io.Reader) (interface{}, error) {
 		return readWriteAtRequest(header, reader)
 	case MessageTypeAbort:
 		return readAbortRequest(header, reader)
+	case MessageTypeHandshake:
+		return readHandshakeRequest(header, reader)
 	default:
-		return nil, errors.New("unknown request type")
+		return nil, &utils.Error{
+			Code:  utils.ErrCodeUnknownRequestType,
+			Msg:   fmt.Sprintf("unknown request type %d", header.RequestType),
+			Cause: nil,
+			Tags: []string{
+				utils.TagIllegalArgument,
+				utils.TagInternal,
+			},
+		}
 	}
 }
 
@@ -418,6 +465,15 @@ func (r *responseReader) Read(p []byte) (n int, err error) {
 
 func SendSuccessResponse(conn io.Writer, requestUid uint32, message string) {
 	fmt.Printf("Sending operation success response: %s\n", message)
+	resp := BuildSucceedResponse(requestUid, message)
+
+	_, err := io.Copy(conn, NewResponseReader(&resp))
+	if err != nil {
+		log.Printf("Sending operation success response failed: %s\n", err)
+	}
+}
+
+func BuildSucceedResponse(requestUid uint32, message string) ResponseMessage {
 	respHeader := ResponseHeader{
 		RequestUid: requestUid,
 		StatusCode: 0,
@@ -428,11 +484,7 @@ func SendSuccessResponse(conn io.Writer, requestUid uint32, message string) {
 		Header: respHeader,
 		Data:   message,
 	}
-
-	_, err := io.Copy(conn, NewResponseReader(&resp))
-	if err != nil {
-		log.Printf("Sending operation success response failed: %s\n", err)
-	}
+	return resp
 }
 
 // ErrorToResponseMessage converts a utils.Error into a ResponseMessage
@@ -476,41 +528,38 @@ func SendErrorResponse(conn io.Writer, requestUid uint32, err error) {
 		return
 	}
 
+	resp := BuildErrorResponse(requestUid, err)
+
+	_, writeErr := io.Copy(conn, NewResponseReader(resp))
+	if writeErr != nil {
+		log.Printf("SendErrorResponse Write Error: %s", writeErr)
+	}
+}
+
+func BuildErrorResponse(requestUid uint32, err error) *ResponseMessage {
 	var customErr *utils.Error
 	if errors.As(err, &customErr) {
 		resp, convertErr := ErrorToResponseMessage(requestUid, customErr)
 		if convertErr != nil {
 			log.Printf("Error converting custom error to ResponseMessage: %s", convertErr)
-			sendBasicErrorResponse(conn, requestUid, err)
-			return
+			return buildBasicErrorResponse(requestUid, err)
 		}
-
-		if _, writeErr := io.Copy(conn, NewResponseReader(resp)); writeErr != nil {
-			log.Printf("SendErrorResponse Write Error: %s", writeErr)
-		}
-		return
+		return resp
 	}
 
-	// Fallback: send a basic error response for non-utils.Error types
-	sendBasicErrorResponse(conn, requestUid, err)
+	// Fallback: build a basic error response for non-utils.Error types
+	return buildBasicErrorResponse(requestUid, err)
 }
 
-func sendBasicErrorResponse(conn io.Writer, requestUid uint32, err error) {
+func buildBasicErrorResponse(requestUid uint32, err error) *ResponseMessage {
 	msg := err.Error()
-	respHeader := ResponseHeader{
-		RequestUid: requestUid,
-		StatusCode: -1,
-		DataLength: uint32(len(msg)),
-	}
-
-	resp := ResponseMessage{
-		Header: respHeader,
-		Data:   msg,
-	}
-
-	_, copyErr := io.Copy(conn, NewResponseReader(&resp))
-	if copyErr != nil {
-		log.Printf("sendBasicErrorResponse Write Error: %s", copyErr)
+	return &ResponseMessage{
+		Header: ResponseHeader{
+			RequestUid: requestUid,
+			StatusCode: -1,
+			DataLength: uint32(len(msg)),
+		},
+		Data: msg,
 	}
 }
 
