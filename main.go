@@ -33,7 +33,7 @@ func main() {
 
 	//unreliableWriter, err := writers.NewUnreliableLocalWriter(fileName)
 	//unreliableWriter, err := writers.NewUnreliableGCSWriter(ctx, bucket, fileName)
-	cg := proxy.NewConnectionGroup(10, "localhost"+listenAddress, ctx, 2)
+	cg := proxy.NewConnectionGroup(10, "localhost"+listenAddress, ctx, 4)
 	unreliableWriter, err := writers.NewUnreliableProxyWriter(ctx, cg, bucket, fileName)
 	if err != nil {
 		fmt.Println("Failed to create UnreliableProxyWriter:", err)

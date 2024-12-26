@@ -186,13 +186,9 @@ func RequestTypeToString(requestType uint32) string {
 	}
 }
 
-func readRequestHeader(reader io.Reader) (RequestHeader, error) {
-	var header RequestHeader
-	err := binary.Read(reader, binary.BigEndian, &header)
-	if err != nil {
-		return header, err
-	}
-	return header, nil
+func readRequestHeader(r io.Reader) (hdr RequestHeader, err error) {
+	err = binary.Read(r, binary.BigEndian, &hdr)
+	return hdr, err
 }
 
 func readInitUploadSessionRequest(header RequestHeader, reader io.Reader) (*InitUploadSessionRequest, error) {

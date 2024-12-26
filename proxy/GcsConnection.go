@@ -146,18 +146,18 @@ func SendErrorResponse(conn io.Writer, requestUid uint32, err error) {
 	}
 }
 
-type ConnectionGroup struct {
-	messages       chan *RequestMessage
-	ResponseMap    map[uint32]chan *ResponseMessage
-	ResponseMapMux sync.Mutex
-	address        string
-	ctx            context.Context
-	nConnections   int
+type ClientConnectionGroup struct {
+	messages         chan *RequestMessage
+	ResponseMap      map[uint32]chan *ResponseMessage
+	ResponseMapMutex sync.Mutex
+	address          string
+	ctx              context.Context
+	nConnections     int
 }
 
-func NewConnectionGroup(bufferSize int, address string, ctx context.Context, nConnections int) *ConnectionGroup {
-	log.Printf("Creating ConnectionGroup with bufferSize=%d, address=%s, nConnections=%d", bufferSize, address, nConnections)
-	cg := &ConnectionGroup{
+func NewConnectionGroup(bufferSize int, address string, ctx context.Context, nConnections int) *ClientConnectionGroup {
+	log.Printf("Creating ClientConnectionGroup with bufferSize=%d, address=%s, nConnections=%d", bufferSize, address, nConnections)
+	cg := &ClientConnectionGroup{
 		messages:     make(chan *RequestMessage, bufferSize),
 		ResponseMap:  make(map[uint32]chan *ResponseMessage),
 		address:      address,
@@ -177,12 +177,12 @@ func NewConnectionGroup(bufferSize int, address string, ctx context.Context, nCo
 	return cg
 }
 
-func (cg *ConnectionGroup) createConnection() (net.Conn, error) {
+func (cg *ClientConnectionGroup) createConnection() (net.Conn, error) {
 	log.Printf("Creating connection to %s", cg.address)
 	return net.Dial("tcp", cg.address)
 }
 
-func (cg *ConnectionGroup) readFromConn(conn net.Conn, readErrCh chan<- error) {
+func (cg *ClientConnectionGroup) readFromConn(conn net.Conn, readErrCh chan<- error) {
 	log.Println("c")
 	for {
 		select {
@@ -206,7 +206,7 @@ func (cg *ConnectionGroup) readFromConn(conn net.Conn, readErrCh chan<- error) {
 			}
 
 			resp.Data = string(data)
-			cg.ResponseMapMux.Lock()
+			cg.ResponseMapMutex.Lock()
 
 			if ch, exists := cg.ResponseMap[resp.Header.RequestUid]; exists {
 				log.Printf("readFromConn: Sending response for RequestUid=%d", resp.Header.RequestUid)
@@ -216,12 +216,12 @@ func (cg *ConnectionGroup) readFromConn(conn net.Conn, readErrCh chan<- error) {
 			} else {
 				log.Printf("readFromConn: RequestUid=%d not found in ResponseMap", resp.Header.RequestUid)
 			}
-			cg.ResponseMapMux.Unlock()
+			cg.ResponseMapMutex.Unlock()
 		}
 	}
 }
 
-func (cg *ConnectionGroup) writeToConn(conn net.Conn, writeErrCh chan<- error) {
+func (cg *ClientConnectionGroup) writeToConn(conn net.Conn, writeErrCh chan<- error) {
 	log.Println("Starting writeToConn")
 	for {
 		select {
@@ -240,7 +240,7 @@ func (cg *ConnectionGroup) writeToConn(conn net.Conn, writeErrCh chan<- error) {
 	}
 }
 
-func (cg *ConnectionGroup) handleConnection() error {
+func (cg *ClientConnectionGroup) handleConnection() error {
 	log.Println("Handling connection")
 	conn, err := cg.createConnection()
 	if err != nil {
@@ -268,16 +268,16 @@ func (cg *ConnectionGroup) handleConnection() error {
 	}
 }
 
-func (cg *ConnectionGroup) SendMessage(ctx context.Context, msg *RequestMessage) error {
+func (cg *ClientConnectionGroup) SendMessage(ctx context.Context, msg *RequestMessage) error {
 	log.Printf("SendMessage: Sending message with RequestUid=%d", msg.Header.RequestUid)
 	select {
 	case cg.messages <- msg:
-		cg.ResponseMapMux.Lock()
+		cg.ResponseMapMutex.Lock()
 		if _, exists := cg.ResponseMap[msg.Header.RequestUid]; !exists {
 			log.Printf("SendMessage: Creating response channel for RequestUid=%d", msg.Header.RequestUid)
 			cg.ResponseMap[msg.Header.RequestUid] = make(chan *ResponseMessage, 1)
 		}
-		cg.ResponseMapMux.Unlock()
+		cg.ResponseMapMutex.Unlock()
 		return nil
 	case <-ctx.Done():
 		log.Println("SendMessage: Context canceled")
@@ -285,10 +285,10 @@ func (cg *ConnectionGroup) SendMessage(ctx context.Context, msg *RequestMessage)
 	}
 }
 
-func (cg *ConnectionGroup) WaitResponse(ctx context.Context, requestUid uint32) (*ResponseMessage, error) {
-	cg.ResponseMapMux.Lock()
+func (cg *ClientConnectionGroup) WaitResponse(ctx context.Context, requestUid uint32) (*ResponseMessage, error) {
+	cg.ResponseMapMutex.Lock()
 	ch, exists := cg.ResponseMap[requestUid]
-	cg.ResponseMapMux.Unlock()
+	cg.ResponseMapMutex.Unlock()
 	if !exists {
 		return nil, errors.New("response channel not found")
 	}

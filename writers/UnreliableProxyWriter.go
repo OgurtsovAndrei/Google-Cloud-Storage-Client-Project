@@ -12,13 +12,13 @@ import (
 )
 
 type UnreliableProxyWriter struct {
-	cg     *proxy.ConnectionGroup
+	cg     *proxy.ClientConnectionGroup
 	bucket string
 	object string
 	uid    uint32
 }
 
-func NewUnreliableProxyWriter(ctx context.Context, cg *proxy.ConnectionGroup, bucket, object string) (*UnreliableProxyWriter, error) {
+func NewUnreliableProxyWriter(ctx context.Context, cg *proxy.ClientConnectionGroup, bucket, object string) (*UnreliableProxyWriter, error) {
 	w := &UnreliableProxyWriter{
 		cg:     cg,
 		bucket: bucket,
