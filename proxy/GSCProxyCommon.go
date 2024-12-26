@@ -1,11 +1,13 @@
 package proxy
 
 import (
+	"awesomeProject/utils"
 	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 )
 
@@ -23,7 +25,7 @@ type RequestHeader struct {
 
 type ResponseHeader struct {
 	RequestUid uint32
-	StatusCode uint32
+	StatusCode int32
 	DataLength uint32
 }
 
@@ -323,4 +325,237 @@ func ReadRequest(reader io.Reader) (interface{}, error) {
 	default:
 		return nil, errors.New("unknown request type")
 	}
+}
+
+type requestReader struct {
+	headerBuffer  *bytes.Buffer
+	secondHeader  io.Reader
+	data          io.Reader
+	currentReader io.Reader
+}
+
+func NewRequestReader(req *RequestMessage) io.Reader {
+	log.Println("NewResponseReader: Create Request Reader")
+
+	headerBuf := new(bytes.Buffer)
+	_ = binary.Write(headerBuf, binary.BigEndian, req.Header)
+	return &requestReader{
+		headerBuffer:  headerBuf,
+		secondHeader:  req.SecondHeader,
+		data:          req.Data,
+		currentReader: headerBuf,
+	}
+}
+
+func (r *requestReader) Read(p []byte) (n int, err error) {
+	for {
+		if r.currentReader == nil {
+			return n, io.EOF
+		}
+		m, err := r.currentReader.Read(p[n:])
+		n += m
+		if err == io.EOF {
+			if r.currentReader == r.headerBuffer {
+				r.currentReader = r.secondHeader
+			} else if r.currentReader == r.secondHeader {
+				r.currentReader = r.data
+			} else {
+				r.currentReader = nil
+			}
+			if n > 0 {
+				return n, nil
+			}
+		} else if err != nil {
+			return n, err
+		} else {
+			return n, nil
+		}
+	}
+}
+
+type responseReader struct {
+	headerBuffer  *bytes.Buffer
+	data          io.Reader
+	currentReader io.Reader
+}
+
+func NewResponseReader(resp *ResponseMessage) io.Reader {
+	log.Println("NewResponseReader: Create Response Reader")
+	headerBuf := new(bytes.Buffer)
+	_ = binary.Write(headerBuf, binary.BigEndian, resp.Header)
+	return &responseReader{
+		headerBuffer:  headerBuf,
+		data:          strings.NewReader(resp.Data),
+		currentReader: headerBuf,
+	}
+}
+
+func (r *responseReader) Read(p []byte) (n int, err error) {
+	log.Println("Response Message: Starting Read")
+	for {
+		if r.currentReader == nil {
+			return n, io.EOF
+		}
+		m, err := r.currentReader.Read(p[n:])
+		log.Printf("responseReader: Read %d bytes: %x", m, p[n:n+m])
+		n += m
+		if err == io.EOF {
+			if r.currentReader == r.headerBuffer {
+				r.currentReader = r.data
+			} else {
+				r.currentReader = nil
+			}
+			if n > 0 {
+				return n, nil
+			}
+		} else if err != nil {
+			return n, err
+		} else {
+			return n, nil
+		}
+	}
+}
+
+func SendSuccessResponse(conn io.Writer, requestUid uint32, message string) {
+	fmt.Printf("Sending operation success response: %s\n", message)
+	respHeader := ResponseHeader{
+		RequestUid: requestUid,
+		StatusCode: 0,
+		DataLength: uint32(len(message)),
+	}
+
+	resp := ResponseMessage{
+		Header: respHeader,
+		Data:   message,
+	}
+
+	_, err := io.Copy(conn, NewResponseReader(&resp))
+	if err != nil {
+		log.Printf("Sending operation success response failed: %s\n", err)
+	}
+}
+
+// ErrorToResponseMessage converts a utils.Error into a ResponseMessage
+// If serialization fails, creates a simple ResponseMessage with StatusCode -2
+func ErrorToResponseMessage(requestUid uint32, err *utils.Error) (*ResponseMessage, error) {
+	// Attempt to serialize the error into JSON
+	jsonError, serializationErr := err.ToJSON()
+	if serializationErr != nil {
+		// Fallback to a simple error response
+		log.Printf("ErrorToResponseMessage: Failed to serialize error, using fallback. Error: %v", serializationErr)
+
+		// Create a simple ResponseMessage
+		fallbackMessage := &ResponseMessage{
+			Header: ResponseHeader{
+				RequestUid: requestUid,
+				StatusCode: -2, // Indicates a fallback error response
+				DataLength: uint32(len(serializationErr.Error())),
+			},
+			Data: serializationErr.Error(),
+		}
+
+		return fallbackMessage, serializationErr
+	}
+
+	// Create the standard ResponseMessage
+	resp := &ResponseMessage{
+		Header: ResponseHeader{
+			RequestUid: requestUid,
+			StatusCode: -1, // Indicates an error response
+			DataLength: uint32(len(jsonError)),
+		},
+		Data: jsonError,
+	}
+
+	return resp, nil
+}
+
+func SendErrorResponse(conn io.Writer, requestUid uint32, err error) {
+	if err == nil {
+		SendSuccessResponse(conn, requestUid, "")
+		return
+	}
+
+	var customErr *utils.Error
+	if errors.As(err, &customErr) {
+		resp, convertErr := ErrorToResponseMessage(requestUid, customErr)
+		if convertErr != nil {
+			log.Printf("Error converting custom error to ResponseMessage: %s", convertErr)
+			sendBasicErrorResponse(conn, requestUid, err)
+			return
+		}
+
+		if _, writeErr := io.Copy(conn, NewResponseReader(resp)); writeErr != nil {
+			log.Printf("SendErrorResponse Write Error: %s", writeErr)
+		}
+		return
+	}
+
+	// Fallback: send a basic error response for non-utils.Error types
+	sendBasicErrorResponse(conn, requestUid, err)
+}
+
+func sendBasicErrorResponse(conn io.Writer, requestUid uint32, err error) {
+	msg := err.Error()
+	respHeader := ResponseHeader{
+		RequestUid: requestUid,
+		StatusCode: -1,
+		DataLength: uint32(len(msg)),
+	}
+
+	resp := ResponseMessage{
+		Header: respHeader,
+		Data:   msg,
+	}
+
+	_, copyErr := io.Copy(conn, NewResponseReader(&resp))
+	if copyErr != nil {
+		log.Printf("sendBasicErrorResponse Write Error: %s", copyErr)
+	}
+}
+
+func ReadResponse(reader io.Reader) (*ResponseMessage, error) {
+	// Read the response header
+	var header ResponseHeader
+	err := binary.Read(reader, binary.BigEndian, &header)
+	if err != nil {
+		if err == io.EOF {
+			return nil, io.EOF // End of stream
+		}
+		return nil, fmt.Errorf("failed to read response header: %w", err)
+	}
+
+	// Read the response data
+	data := make([]byte, header.DataLength)
+	_, err = io.ReadFull(reader, data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response data: %w", err)
+	}
+
+	// Construct the response message
+	response := &ResponseMessage{
+		Header: header,
+		Data:   string(data),
+	}
+
+	return response, nil
+}
+
+// IsErr checks if the ResponseMessage represents an error.
+func (resp *ResponseMessage) IsErr() bool {
+	return resp.Header.StatusCode < 0
+}
+
+// AsErr deserializes the ResponseMessage into a utils.Error if it represents an error.
+func (resp *ResponseMessage) AsErr() (*utils.Error, error) {
+	if !resp.IsErr() {
+		return nil, errors.New("response does not represent an error")
+	}
+
+	customErr, err := utils.FromJSON(resp.Data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to deserialize error data: %w", err)
+	}
+
+	return customErr, nil
 }
