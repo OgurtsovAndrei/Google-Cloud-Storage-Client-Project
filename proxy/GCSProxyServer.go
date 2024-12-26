@@ -80,6 +80,7 @@ func (proxyServer *GcsProxyServer) handleRequest(ctx context.Context, r interfac
 		fmt.Println("Processing WriteAtRequest:", req)
 		err := handleWriteAt(proxyServer.ctx, respondConn, &proxyServer.uploadSessions, &proxyServer.mutex, req)
 		if err != nil {
+			fmt.Println("Error processing WriteAtRequest:", err)
 			SendErrorResponse(respondConn, req.Header.RequestUid, err)
 			return err
 		}
