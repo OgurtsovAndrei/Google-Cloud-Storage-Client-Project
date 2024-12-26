@@ -3,25 +3,44 @@ package proxy
 import (
 	"awesomeProject/utils"
 	"context"
+	"crypto/rand"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 )
 
 type ClientConnectionGroup struct {
+	clientID         string
 	messages         chan *RequestMessage
 	responseMap      map[uint32]chan *ResponseMessage
 	responseMapMutex sync.Mutex
 	address          string
 	ctx              context.Context
 	nConnections     int
+	uid              uint32
+}
+
+func (cg *ClientConnectionGroup) NextUid() uint32 {
+	return atomic.AddUint32(&cg.uid, 1)
+}
+
+func generateRandomClientID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("%x", b)
 }
 
 func NewClientConnectionGroup(bufferSize int, address string, ctx context.Context, nConnections int) *ClientConnectionGroup {
-	log.Printf("Creating ClientConnectionGroup with bufferSize=%d, address=%s, nConnections=%d", bufferSize, address, nConnections)
+	clientID := generateRandomClientID()
+	log.Printf("Creating ClientConnectionGroup with clientID=%s, bufferSize=%d, address=%s, nConnections=%d",
+		clientID, bufferSize, address, nConnections)
+
 	cg := &ClientConnectionGroup{
+		clientID:     clientID,
 		messages:     make(chan *RequestMessage, bufferSize),
 		responseMap:  make(map[uint32]chan *ResponseMessage),
 		address:      address,
@@ -30,13 +49,13 @@ func NewClientConnectionGroup(bufferSize int, address string, ctx context.Contex
 	}
 
 	for i := 0; i < nConnections; i++ {
-		goHandleConnection(cg, i)
+		goHandleClientConnection(cg, i)
 	}
 
 	return cg
 }
 
-func goHandleConnection(cg *ClientConnectionGroup, i int) {
+func goHandleClientConnection(cg *ClientConnectionGroup, i int) {
 	go func(i int) {
 		log.Printf("Starting connection goroutine %d", i)
 		err := cg.handleConnection(i)
@@ -58,6 +77,11 @@ func (cg *ClientConnectionGroup) handleConnection(i int) error {
 	}
 	defer conn.Close()
 
+	if err := cg.sendHandshake(conn); err != nil {
+		log.Printf("handleConnection: handshake failed: %v", err)
+		return err
+	}
+
 	readErrCh := make(chan error, 1)
 	writeErrCh := make(chan error, 1)
 
@@ -78,10 +102,39 @@ func (cg *ClientConnectionGroup) handleConnection(i int) error {
 	if errors.As(err, &customErr) {
 		if !customErr.HasTag(utils.TagContextCanceled) &&
 			(customErr.HasTag(utils.TagNetwork) || customErr.HasTag(utils.TagRetryable)) {
-			goHandleConnection(cg, i)
+			goHandleClientConnection(cg, i)
 		}
 	}
 	return err
+}
+
+func (cg *ClientConnectionGroup) sendHandshake(conn net.Conn) error {
+	handshakeReq := HandshakeRequest{
+		Header: RequestHeader{
+			RequestUid:  cg.NextUid(),
+			RequestType: MessageTypeHandshake,
+		},
+		HandshakeHeader: HandshakeHeader{
+			ClientIDLength: uint32(len(cg.clientID)),
+		},
+		ClientID: cg.clientID,
+	}
+
+	message := handshakeReq.ToRequestMessage()
+	if _, err := io.Copy(conn, NewRequestReader(&message)); err != nil {
+		return err
+	}
+
+	resp, err := ReadResponse(conn)
+	if err != nil {
+		return err
+	}
+	if resp.IsErr() {
+		return fmt.Errorf("handshake error from server: %s", resp.Data)
+	}
+
+	log.Printf("sendHandshake: handshake success, server responded: %s", resp.Data)
+	return nil
 }
 
 func (cg *ClientConnectionGroup) writeToConnGoroutine(conn net.Conn, writeErrCh chan<- error) {
