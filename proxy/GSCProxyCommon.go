@@ -382,8 +382,6 @@ type requestReader struct {
 }
 
 func NewRequestReader(req *RequestMessage) io.Reader {
-	log.Println("NewResponseReader: Create Request Reader")
-
 	headerBuf := new(bytes.Buffer)
 	_ = binary.Write(headerBuf, binary.BigEndian, req.Header)
 	return &requestReader{
@@ -427,7 +425,7 @@ type responseReader struct {
 }
 
 func NewResponseReader(resp *ResponseMessage) io.Reader {
-	log.Println("NewResponseReader: Create Response Reader")
+	//log.Println("NewResponseReader: Create Response Reader")
 	headerBuf := new(bytes.Buffer)
 	_ = binary.Write(headerBuf, binary.BigEndian, resp.Header)
 	return &responseReader{
@@ -444,7 +442,7 @@ func (r *responseReader) Read(p []byte) (n int, err error) {
 			return n, io.EOF
 		}
 		m, err := r.currentReader.Read(p[n:])
-		log.Printf("responseReader: Read %d bytes: %x", m, p[n:n+m])
+		//log.Printf("responseReader: Read %d bytes: %x", m, p[n:n+m])
 		n += m
 		if err == io.EOF {
 			if r.currentReader == r.headerBuffer {
@@ -564,6 +562,8 @@ func buildBasicErrorResponse(requestUid uint32, err error) *ResponseMessage {
 }
 
 func ReadResponse(reader io.Reader) (*ResponseMessage, error) {
+	log.Println("ReadResponse: Starting to read response header")
+
 	// Read the response header
 	var header ResponseHeader
 	err := binary.Read(reader, binary.BigEndian, &header)
@@ -573,6 +573,7 @@ func ReadResponse(reader io.Reader) (*ResponseMessage, error) {
 		}
 		return nil, fmt.Errorf("failed to read response header: %w", err)
 	}
+	log.Printf("ReadResponse: Successfully read response header: %+v", header)
 
 	// Read the response data
 	data := make([]byte, header.DataLength)
@@ -580,6 +581,7 @@ func ReadResponse(reader io.Reader) (*ResponseMessage, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response data: %w", err)
 	}
+	log.Printf("ReadResponse: Successfully read response data \\ header = %+v", header)
 
 	// Construct the response message
 	response := &ResponseMessage{

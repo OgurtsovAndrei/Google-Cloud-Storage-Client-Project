@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"log"
 	"net"
@@ -33,28 +32,31 @@ func NewClientConnectionPool(clientID string, parentCtx context.Context) *Client
 	}
 }
 
-func (clientPool *ClientConnectionPool) SendMessage(ctx context.Context, msg *ResponseMessage) {
-	log.Printf("SendMessage: Sending message with RequestUid=%d", msg.Header.RequestUid)
+func (clientPool *ClientConnectionPool) SendResponseMessage(ctx context.Context, msg *ResponseMessage) {
+	log.Printf("SERVER: SendResponseMessage: Sending message with RequestUid=%d", msg.Header.RequestUid)
 	select {
 	case clientPool.messages <- msg:
+		log.Printf("SERVER: SendResponseMessage: Sent response message with RequestUid=%d", msg.Header.RequestUid)
 	case <-ctx.Done():
-		log.Println("SendMessage: Context canceled")
+		log.Println("SERVER: SendResponseMessage: Context canceled")
 	}
 }
 
 func (clientPool *ClientConnectionPool) writeToConnGoroutine(conn net.Conn, sgc *ServerConnectionGroup, clientUid string) {
-	log.Println("Starting writeToConnGoroutine")
+	log.Println("SERVER: Server: Starting writeToConnGoroutine")
 	for {
 		select {
 		case req := <-clientPool.messages:
-			log.Printf("writeToConnGoroutine: Sending request for RequestUid=%d", req.Header.RequestUid)
+			log.Printf("SERVER: writeToConnGoroutine: Sending response for RequestUid=%d, Body=%s", req.Header.RequestUid, req.Data)
 			if _, err := io.Copy(conn, NewResponseReader(req)); err != nil {
-				log.Printf("writeToConnGoroutine: Error writing request: %v", err)
+				log.Printf("SERVER: writeToConnGoroutine: Error writing request: %v", err)
 				sgc.UnRegisterConnection(clientUid, conn)
 				return
 			}
+
+			log.Printf("SERVER: writeToConnGoroutine: Successfully sent response for RequestUid=%d, Body=%s", req.Header.RequestUid, req.Data)
 		case <-clientPool.ctx.Done():
-			log.Println("writeToConnGoroutine: Context canceled")
+			log.Println("SERVER: writeToConnGoroutine: Context canceled")
 			return
 		}
 	}
@@ -80,7 +82,7 @@ func NewServerConnectionGroup(address string, ctx context.Context, handleRequest
 
 	l, err := net.Listen("tcp", address)
 	if err != nil {
-		log.Printf("NewServerConnectionGroup: Не удалось слушать адрес %s: %v", address, err)
+		log.Printf("SERVER: NewServerConnectionGroup: Не удалось слушать адрес %s: %v", address, err)
 		return nil, err
 	}
 
@@ -90,15 +92,15 @@ func NewServerConnectionGroup(address string, ctx context.Context, handleRequest
 		for _, sc := range scg.clientsSessions {
 			sc.cancel()
 		}
-		fmt.Println("GCSProxyServer has been shut down.")
+		log.Println("SERVER: GCSProxyServer has been shut down.")
 	}()
 
 	go func() {
-		log.Printf("Server listening on %s...", address)
+		log.Printf("SERVER: Server listening on %s...", address)
 		for {
 			select {
 			case <-ctx.Done():
-				log.Println("NewServerConnectionGroup: Contex Done, stopping accepting connections...")
+				log.Println("SERVER: NewServerConnectionGroup: Contex Done, stopping accepting connections...")
 				_ = l.Close()
 				return
 			default:
@@ -106,17 +108,17 @@ func NewServerConnectionGroup(address string, ctx context.Context, handleRequest
 				if err != nil {
 					select {
 					case <-ctx.Done():
-						log.Println("NewServerConnectionGroup: Context closed, aborting accept...")
+						log.Println("SERVER: NewServerConnectionGroup: Context closed, aborting accept...")
 						return
 					default:
-						log.Printf("NewServerConnectionGroup: Error Accept: %v", err)
+						log.Printf("SERVER: NewServerConnectionGroup: Error Accept: %v", err)
 						continue
 					}
 				}
 
 				r, err := ReadRequest(conn)
 				if err != nil {
-					log.Printf("NewServerConnectionGroup: Error ReadRequest: %v", err)
+					log.Printf("SERVER: NewServerConnectionGroup: Error ReadRequest: %v", err)
 					return
 				}
 
@@ -125,7 +127,7 @@ func NewServerConnectionGroup(address string, ctx context.Context, handleRequest
 				case *HandshakeRequest:
 					clientConnectionPool = scg.RegisterConnection(req, conn)
 				default:
-					log.Printf("NewServerConnectionGroup: Error ReadRequest: %v", err)
+					log.Printf("SERVER: NewServerConnectionGroup: Error ReadRequest: %v", err)
 					return
 				}
 
@@ -159,7 +161,7 @@ func (scg *ServerConnectionGroup) cleanupConnPool(clientConn *ClientConnectionPo
 	}
 	clientConn.nConnections = 0
 	for msg := range clientConn.messages {
-		log.Printf("Drop message %s from %s", msg, clientConn.clientID)
+		log.Printf("SERVER: Drop message %s from %s", msg, clientConn.clientID)
 	}
 }
 
@@ -172,16 +174,15 @@ func (scg *ServerConnectionGroup) RegisterConnection(req *HandshakeRequest, conn
 		clientConnPool = NewClientConnectionPool(req.ClientID, scg.ctx)
 		scg.clientsSessions[req.ClientID] = clientConnPool
 	}
-	clientConnPool.writeToConnGoroutine(conn, scg, req.ClientID)
+	go clientConnPool.writeToConnGoroutine(conn, scg, req.ClientID)
 	clientConnPool.lock.Lock()
 	defer clientConnPool.lock.Unlock()
 	clientConnPool.conns[conn] = true
 	clientConnPool.nConnections++
-	log.Printf("Client %s: registered a new connection, total=%d",
+	log.Printf("SERVER: Client %s: registered a new connection, total=%d",
 		req.ClientID, clientConnPool.nConnections)
 
-	response := BuildSucceedResponse(req.Header.RequestUid, "OK")
-	clientConnPool.SendMessage(clientConnPool.ctx, &response)
+	SendSuccessResponse(conn, req.Header.RequestUid, "OK")
 	return clientConnPool
 }
 
@@ -205,26 +206,26 @@ func (scg *ServerConnectionGroup) UnRegisterConnection(clientID string, conn net
 }
 
 func (scg *ServerConnectionGroup) handleConnection(conn net.Conn, connPool *ClientConnectionPool) {
-	log.Printf("handleConnection: Starting to process new connection from %s", conn.RemoteAddr().String())
+	log.Printf("SERVER: handleConnection: Starting to process new connection from %s", conn.RemoteAddr().String())
 
 	for {
 		select {
 		case <-scg.ctx.Done():
-			log.Println("handleConnection: Context canceled, exiting")
+			log.Println("SERVER: handleConnection: Context canceled, exiting")
 			return
 		default:
 			r, err := ReadRequest(conn)
 			if err != nil {
 				if err == io.EOF {
-					log.Printf("handleConnection: Client %s closed the connection", conn.RemoteAddr().String())
+					log.Printf("SERVER: handleConnection: Client %s closed the connection", conn.RemoteAddr().String())
 				} else {
-					log.Printf("handleConnection: Error reading request: %v", err)
+					log.Printf("SERVER: handleConnection: Error reading request: %v", err)
 				}
 				return
 			}
 
 			if err := scg.handleRequest(scg.ctx, r, connPool); err != nil {
-				log.Printf("handleConnection: Error handling request: %v", err)
+				log.Printf("SERVER: handleConnection: Error handling request: %v", err)
 			}
 		}
 	}

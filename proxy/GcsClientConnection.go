@@ -36,7 +36,7 @@ func generateRandomClientID() string {
 
 func NewClientConnectionGroup(bufferSize int, address string, ctx context.Context, nConnections int) *ClientConnectionGroup {
 	clientID := generateRandomClientID()
-	log.Printf("Creating ClientConnectionGroup with clientID=%s, bufferSize=%d, address=%s, nConnections=%d",
+	log.Printf("CLIENT: Creating ClientConnectionGroup with clientID=%s, bufferSize=%d, address=%s, nConnections=%d",
 		clientID, bufferSize, address, nConnections)
 
 	cg := &ClientConnectionGroup{
@@ -57,30 +57,31 @@ func NewClientConnectionGroup(bufferSize int, address string, ctx context.Contex
 
 func goHandleClientConnection(cg *ClientConnectionGroup, i int) {
 	go func(i int) {
-		log.Printf("Starting connection goroutine %d", i)
+		log.Printf("CLIENT: Starting connection goroutine %d", i)
 		err := cg.handleConnection(i)
-		log.Printf("Connection goroutine %d error: %v", i, err)
+		log.Printf("CLIENT: Connection goroutine %d error: %v", i, err)
 	}(i)
 }
 
 func (cg *ClientConnectionGroup) createConnection() (net.Conn, error) {
-	log.Printf("Creating connection to %s", cg.address)
+	log.Printf("CLIENT: Creating connection to %s", cg.address)
 	return net.Dial("tcp", cg.address)
 }
 
 func (cg *ClientConnectionGroup) handleConnection(i int) error {
-	log.Println("Handling connection")
+	log.Println("CLIENT: Handling connection")
 	conn, err := cg.createConnection()
 	if err != nil {
-		log.Printf("handleConnection: Error creating connection: %v", err)
+		log.Printf("CLIENT: handleConnection: Error creating connection: %v", err)
 		return err
 	}
 	defer conn.Close()
 
 	if err := cg.sendHandshake(conn); err != nil {
-		log.Printf("handleConnection: handshake failed: %v", err)
+		log.Printf("CLIENT: handleConnection: handshake failed: %v", err)
 		return err
 	}
+	log.Printf("CLIENT: Connection established for goroutine %d", i)
 
 	readErrCh := make(chan error, 1)
 	writeErrCh := make(chan error, 1)
@@ -90,12 +91,12 @@ func (cg *ClientConnectionGroup) handleConnection(i int) error {
 
 	select {
 	case <-cg.ctx.Done():
-		log.Println("handleConnection: Context canceled")
+		log.Println("CLIENT: handleConnection: Context canceled")
 		return utils.CastContextError(cg.ctx.Err())
 	case err := <-readErrCh:
-		log.Printf("handleConnection: Read error: %v", err)
+		log.Printf("CLIENT: handleConnection: Read error: %v", err)
 	case err := <-writeErrCh:
-		log.Printf("handleConnection: Write error: %v", err)
+		log.Printf("CLIENT: handleConnection: Write error: %v", err)
 	}
 
 	var customErr *utils.Error
@@ -130,21 +131,21 @@ func (cg *ClientConnectionGroup) sendHandshake(conn net.Conn) error {
 		return err
 	}
 	if resp.IsErr() {
-		return fmt.Errorf("handshake error from server: %s", resp.Data)
+		return fmt.Errorf("CLIENT: handshake error from server: %s", resp.Data)
 	}
 
-	log.Printf("sendHandshake: handshake success, server responded: %s", resp.Data)
+	log.Printf("CLIENT: sendHandshake: handshake success, server responded: %s", resp.Data)
 	return nil
 }
 
 func (cg *ClientConnectionGroup) writeToConnGoroutine(conn net.Conn, writeErrCh chan<- error) {
-	log.Println("Starting writeToConnGoroutine")
+	log.Println("CLIENT: Starting writeToConnGoroutine")
 	for {
 		select {
 		case req := <-cg.messages:
-			log.Printf("writeToConnGoroutine: Sending request for RequestUid=%d", req.Header.RequestUid)
+			log.Printf("CLIENT: writeToConnGoroutine: Sending request for RequestUid=%d", req.Header.RequestUid)
 			if _, err := io.Copy(conn, NewRequestReader(req)); err != nil {
-				log.Printf("writeToConnGoroutine: Error writing request: %v", err)
+				log.Printf("CLIENT: writeToConnGoroutine: Error writing request: %v", err)
 				writeErrCh <- err
 
 				tags := []string{
@@ -155,19 +156,19 @@ func (cg *ClientConnectionGroup) writeToConnGoroutine(conn net.Conn, writeErrCh 
 
 				myErr := utils.Error{
 					Code:  utils.ErrCodeHandleConnectionFailed,
-					Msg:   "writeToConnGoroutine: Error writing request",
+					Msg:   "CLIENT: writeToConnGoroutine: Error writing request",
 					Cause: err,
 					Tags:  tags,
 				}
 				message, err := ErrorToResponseMessage(req.Header.RequestUid, &myErr)
 				if err != nil {
-					log.Printf("writeToConnGoroutine: Error writing response: %v", err)
+					log.Printf("CLIENT: writeToConnGoroutine: Error writing response: %v", err)
 				}
 				cg.dispatchResponse(message)
 				return
 			}
 		case <-cg.ctx.Done():
-			log.Println("writeToConnGoroutine: Context canceled")
+			log.Println("CLIENT: writeToConnGoroutine: Context canceled")
 			writeErrCh <- utils.CastContextError(cg.ctx.Err())
 			return
 		}
@@ -175,17 +176,17 @@ func (cg *ClientConnectionGroup) writeToConnGoroutine(conn net.Conn, writeErrCh 
 }
 
 func (cg *ClientConnectionGroup) readFromConnGoroutine(conn net.Conn, readErrCh chan<- error) {
-	log.Println("c")
 	for {
 		select {
 		case <-cg.ctx.Done():
-			log.Println("readFromConnGoroutine: Context canceled")
+			log.Println("CLIENT: readFromConnGoroutine: Context canceled")
 			readErrCh <- utils.CastContextError(cg.ctx.Err())
 			return
 		default:
 			resp, err := ReadResponse(conn)
+			fmt.Printf("CLIENT: readFromConnGoroutine: Received response: %+v\n", resp)
 			if err != nil {
-				log.Printf("readFromConnGoroutine: Error reading Data: %v", err)
+				log.Printf("CLIENT: readFromConnGoroutine: Error reading Data: %v", err)
 				readErrCh <- err
 				return
 			}
@@ -201,7 +202,7 @@ func (cg *ClientConnectionGroup) dispatchResponse(resp *ResponseMessage) {
 
 	ch, exists := cg.responseMap[resp.Header.RequestUid]
 	if !exists {
-		log.Printf("Response channel for RequestUid=%d not found", resp.Header.RequestUid)
+		log.Printf("CLIENT: Response channel for RequestUid=%d not found", resp.Header.RequestUid)
 		return
 	}
 
@@ -211,18 +212,18 @@ func (cg *ClientConnectionGroup) dispatchResponse(resp *ResponseMessage) {
 }
 
 func (cg *ClientConnectionGroup) SendMessage(ctx context.Context, msg *RequestMessage) *utils.Error {
-	log.Printf("SendMessage: Sending message with RequestUid=%d", msg.Header.RequestUid)
+	log.Printf("CLIENT: SendResponseMessage: Sending message with RequestUid=%d", msg.Header.RequestUid)
 	select {
 	case cg.messages <- msg:
 		cg.responseMapMutex.Lock()
 		if _, exists := cg.responseMap[msg.Header.RequestUid]; !exists {
-			log.Printf("SendMessage: Creating response channel for RequestUid=%d", msg.Header.RequestUid)
+			log.Printf("CLIENT: SendResponseMessage: Creating response channel for RequestUid=%d", msg.Header.RequestUid)
 			cg.responseMap[msg.Header.RequestUid] = make(chan *ResponseMessage, 1)
 		}
 		cg.responseMapMutex.Unlock()
 		return nil
 	case <-ctx.Done():
-		log.Println("SendMessage: Context canceled")
+		log.Println("CLIENT: SendResponseMessage: Context canceled")
 		return utils.CastContextError(ctx.Err())
 	}
 }
@@ -234,10 +235,11 @@ func (cg *ClientConnectionGroup) WaitResponse(ctx context.Context, requestUid ui
 	if !exists {
 		return nil, &utils.Error{
 			Code: utils.ErrCodeResponseChannelNotFound,
-			Msg:  "Response channel not found for given request ID",
+			Msg:  "CLIENT: Response channel not found for given request ID",
 			Tags: []string{utils.TagIllegalArgument},
 		}
 	}
+	fmt.Println("CLIENT: Waiting for response... for request - " + fmt.Sprint(requestUid))
 	select {
 	case <-ctx.Done():
 		return nil, utils.CastContextError(ctx.Err())
