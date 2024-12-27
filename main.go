@@ -11,7 +11,7 @@ import (
 
 var (
 	bucket               = "another-eu-1-reg-bucket-finland"
-	sizeMB               = 256
+	sizeMB               = 128
 	totalSize            = int64(sizeMB * 1024 * 1024)
 	fileName             = "1GB_output_file.dat"
 	maxCacheSize  uint32 = 64 * 1024 * 1024

@@ -62,22 +62,22 @@ func (proxyServer *GcsProxyServer) handleRequest(ctx context.Context, r interfac
 		err := handleInitUploadSession(ctx, &proxyServer.uploadSessions, &proxyServer.mutex, *req)
 		if err != nil {
 			resp := BuildErrorResponse(req.Header.RequestUid, err)
-			connections.SendMessage(ctx, resp)
+			connections.SendResponseMessage(ctx, resp)
 			return err
 		}
 		resp := BuildSucceedResponse(req.Header.RequestUid, fmt.Sprintf("OK"))
-		connections.SendMessage(ctx, &resp)
+		connections.SendResponseMessage(ctx, &resp)
 		return nil
 	case *GetResumeOffsetRequest:
 		fmt.Println("Processing GetResumeOffsetRequest:", req)
 		off, err := handleGetResumeOffset(&proxyServer.uploadSessions, &proxyServer.mutex, req)
 		if err != nil {
 			resp := BuildErrorResponse(req.Header.RequestUid, err)
-			connections.SendMessage(ctx, resp)
+			connections.SendResponseMessage(ctx, resp)
 			return err
 		}
 		resp := BuildSucceedResponse(req.Header.RequestUid, fmt.Sprintf("%d", off))
-		connections.SendMessage(ctx, &resp)
+		connections.SendResponseMessage(ctx, &resp)
 		return nil
 	case *WriteAtRequest:
 		fmt.Println("Processing WriteAtRequest:", req)
@@ -85,7 +85,7 @@ func (proxyServer *GcsProxyServer) handleRequest(ctx context.Context, r interfac
 		if err != nil {
 			fmt.Println("Error processing WriteAtRequest:", err)
 			resp := BuildErrorResponse(req.Header.RequestUid, err)
-			connections.SendMessage(ctx, resp)
+			connections.SendResponseMessage(ctx, resp)
 			return err
 		}
 		return nil
@@ -94,11 +94,11 @@ func (proxyServer *GcsProxyServer) handleRequest(ctx context.Context, r interfac
 		err := handleAbort(&proxyServer.uploadSessions, &proxyServer.mutex, req)
 		if err != nil {
 			resp := BuildErrorResponse(req.Header.RequestUid, err)
-			connections.SendMessage(ctx, resp)
+			connections.SendResponseMessage(ctx, resp)
 			return err
 		}
 		resp := BuildSucceedResponse(req.Header.RequestUid, fmt.Sprintf("OK"))
-		connections.SendMessage(ctx, &resp)
+		connections.SendResponseMessage(ctx, &resp)
 		return nil
 	default:
 		return &utils.Error{
@@ -272,11 +272,11 @@ func handleNewChunk(ctx context.Context, connections *ClientConnectionPool, sess
 				Tags:  []string{utils.TagInternal},
 			}
 			resp := BuildErrorResponse(header.Header.RequestUid, customErr)
-			connections.SendMessage(ctx, resp)
+			connections.SendResponseMessage(ctx, resp)
 			return
 		}
 		resp := BuildSucceedResponse(header.Header.RequestUid, fmt.Sprintf("OK"))
-		connections.SendMessage(ctx, &resp)
+		connections.SendResponseMessage(ctx, &resp)
 	}()
 
 	return nil
