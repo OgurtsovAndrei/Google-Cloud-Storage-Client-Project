@@ -32,11 +32,11 @@ func main() {
 	time.Sleep(1 * time.Second)
 
 	//unreliableWriter, err := writers.NewUnreliableLocalWriter(fileName)
-	//unreliableWriter, err := writers.NewUnreliableGCSWriter(ctx, bucket, fileName)
-	cg := proxy.NewClientConnectionGroup(10, "localhost"+listenAddress, ctx, 4)
-	unreliableWriter, err := writers.NewUnreliableProxyWriter(ctx, cg, bucket, fileName)
+	unreliableWriter, err := writers.NewUnreliableGCSWriter(ctx, bucket, fileName)
+	//cg := proxy.NewClientConnectionGroup(10, "localhost"+listenAddress, ctx, 4)
+	//unreliableWriter, err := writers.NewUnreliableProxyWriter(ctx, cg, bucket, fileName)
 	if err != nil {
-		fmt.Println("Failed to create UnreliableProxyWriter:", err)
+		fmt.Println("Failed to create UnreliableWriter:", err)
 		return
 	}
 
