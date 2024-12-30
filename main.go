@@ -1,7 +1,6 @@
 package main
 
 import (
-	"awesomeProject/proxy"
 	"awesomeProject/writers"
 	"context"
 	"fmt"
@@ -25,11 +24,11 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	go func() {
-		_ = proxy.NewGcsProxyServer(ctx, listenAddress)
-	}()
+	//go func() {
+	//	_ = proxy.NewGcsProxyServer(ctx, listenAddress)
+	//}()
 
-	time.Sleep(1 * time.Second)
+	//time.Sleep(1 * time.Second)
 
 	//unreliableWriter, err := writers.NewUnreliableLocalWriter(fileName)
 	unreliableWriter, err := writers.NewUnreliableGCSWriter(ctx, bucket, fileName)

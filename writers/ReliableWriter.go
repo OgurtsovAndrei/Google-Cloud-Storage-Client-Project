@@ -128,6 +128,7 @@ func (rw *ReliableWriterImpl) Complete(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case err = <-rw.resultChan:
+		fmt.Printf("Error received: %v\n", err)
 	}
 	if err != nil {
 		return fmt.Errorf("writing failed: %w", err)

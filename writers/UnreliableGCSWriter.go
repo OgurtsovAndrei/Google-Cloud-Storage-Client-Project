@@ -1,9 +1,11 @@
 package writers
 
 import (
+	"awesomeProject/netUtils"
 	"awesomeProject/utils"
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 )
 
@@ -16,8 +18,16 @@ type UnreliableGCSWriter struct {
 	objectName string
 }
 
+var (
+	checkCancelConnThreshold int64 = 7 * 1024 * 1024
+)
+
 func NewUnreliableGCSWriter(ctx context.Context, bucket, objectName string) (*UnreliableGCSWriter, error) {
-	gcsClient, err := utils.NewGcsClient(ctx)
+	customTransport := &http.Transport{
+		DialContext: netUtils.NewUnstableDialer(checkCancelConnThreshold).DialContext,
+	}
+	gcsClient, err := utils.NewGcsClientWithCustomTransport(ctx, customTransport)
+	//gcsClient, err := utils.NewGcsClient(ctx)
 	if err != nil {
 		return nil, &utils.Error{
 			Code:  utils.ErrCodeInitSession,

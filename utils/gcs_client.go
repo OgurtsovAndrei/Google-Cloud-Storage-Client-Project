@@ -22,29 +22,37 @@ type GcsClient struct {
 	h http.Client
 }
 
-func NewGcsClient(ctx context.Context) (c *GcsClient, err error) {
-	return NewGcsClientWithCustomClient(ctx, nil)
+func NewGcsClient(ctx context.Context) (*GcsClient, error) {
+	return NewGcsClientWithCustomTransport(ctx, nil)
 }
 
-func NewGcsClientWithCustomClient(ctx context.Context, httpClient *http.Client) (*GcsClient, error) {
-	if httpClient == nil {
-		creds, err := google.FindDefaultCredentials(ctx, storage.ScopeFullControl)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load the credentials: %w", err)
-		}
+func NewGcsClientWithCustomTransport(ctx context.Context, customTransport *http.Transport) (*GcsClient, error) {
+	creds, err := google.FindDefaultCredentials(ctx, storage.ScopeFullControl)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load the credentials: %w", err)
+	}
 
-		ts := oauth2.ReuseTokenSourceWithExpiry(nil, creds.TokenSource, time.Minute)
-		tr, err := htransport.NewTransport(ctx, http.DefaultTransport,
+	ts := oauth2.ReuseTokenSourceWithExpiry(nil, creds.TokenSource, time.Minute)
+
+	var transport http.RoundTripper
+	if customTransport != nil {
+		// Wrap the custom transport with authorization
+		transport = &oauth2.Transport{
+			Base:   customTransport,
+			Source: ts,
+		}
+	} else {
+		// Create default transport with authorization
+		transport, err = htransport.NewTransport(ctx, http.DefaultTransport,
 			option.WithTokenSource(ts),
 			option.WithTelemetryDisabled(),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build the transport: %w", err)
 		}
-
-		httpClient = &http.Client{Transport: tr}
 	}
 
+	httpClient := &http.Client{Transport: transport}
 	return &GcsClient{h: *httpClient}, nil
 }
 
