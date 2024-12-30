@@ -3,7 +3,6 @@ package netUtils
 import (
 	"context"
 	"net"
-	"net/http"
 )
 
 type GcsUnstableDialer struct {
@@ -30,15 +29,4 @@ func (d *GcsUnstableDialer) DialContext(ctx context.Context, network, address st
 		return nil, err
 	}
 	return NewGcsUnstableConn(baseConn, d.threshold), nil
-}
-
-func NewUnstableHttpClient(threshold int64) *http.Client {
-	unstableDialer := NewUnstableDialer(threshold)
-	transport := &http.Transport{
-		DialContext: unstableDialer.DialContext,
-	}
-
-	return &http.Client{
-		Transport: transport,
-	}
 }
