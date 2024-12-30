@@ -23,24 +23,29 @@ type GcsClient struct {
 }
 
 func NewGcsClient(ctx context.Context) (c *GcsClient, err error) {
-	creds, err := google.FindDefaultCredentials(ctx, storage.ScopeFullControl)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load the credentials: %w", err)
+	return NewGcsClientWithCustomClient(ctx, nil)
+}
+
+func NewGcsClientWithCustomClient(ctx context.Context, httpClient *http.Client) (*GcsClient, error) {
+	if httpClient == nil {
+		creds, err := google.FindDefaultCredentials(ctx, storage.ScopeFullControl)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load the credentials: %w", err)
+		}
+
+		ts := oauth2.ReuseTokenSourceWithExpiry(nil, creds.TokenSource, time.Minute)
+		tr, err := htransport.NewTransport(ctx, http.DefaultTransport,
+			option.WithTokenSource(ts),
+			option.WithTelemetryDisabled(),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build the transport: %w", err)
+		}
+
+		httpClient = &http.Client{Transport: tr}
 	}
 
-	ts := oauth2.ReuseTokenSourceWithExpiry(nil, creds.TokenSource, time.Minute)
-	tr, err := htransport.NewTransport(ctx, http.DefaultTransport,
-		option.WithTokenSource(ts),
-		option.WithTelemetryDisabled(),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build the transport: %w", err)
-	}
-
-	c = &GcsClient{
-		h: http.Client{Transport: tr},
-	}
-	return c, nil
+	return &GcsClient{h: *httpClient}, nil
 }
 
 func (c *GcsClient) UploadObject(ctx context.Context, bucket, name string, reader io.Reader) error {
