@@ -11,7 +11,7 @@ import (
 )
 
 var (
-	cancelConnProba = 32 // p = 1 / x
+	cancelConnProba = 13 // p = (1 / x)
 )
 
 type GcsUnstableConn struct {
@@ -38,6 +38,7 @@ func NewGcsUnstableConn(baseConn net.Conn, threshold int64) *GcsUnstableConn {
 func (e *GcsUnstableConn) checkThreshold(n int64) {
 	e.totalBytes += n
 	if e.totalBytes >= e.threshold {
+		println("Threshold reached")
 		e.closeMx.Lock()
 		if !e.closed {
 			if rand.Intn(cancelConnProba) == 0 {

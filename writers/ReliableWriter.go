@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -15,19 +16,44 @@ type ReliableWriterConfig struct {
 }
 
 type ReliableWriterImpl struct {
-	data             ScatterGatherBuffer
-	writtenBytes     uint64
-	offset           uint64
-	mutex            sync.Mutex
-	MaxCacheSize     uint32
-	MinChunkSize     uint32
-	MaxChunkSize     uint32
-	isComplete       bool
-	isAborted        bool
-	suspendChan      chan struct{}
-	writeEventsChan  chan struct{}
-	unreliableWriter UnreliableWriter
-	resultChan       chan error
+	data                    ScatterGatherBuffer
+	writtenBytes            uint64
+	offset                  uint64
+	mutex                   sync.Mutex
+	MaxCacheSize            uint32
+	MinChunkSize            uint32
+	MaxChunkSize            uint32
+	isComplete              bool
+	isAborted               bool
+	suspendChan             chan struct{}
+	writeEventsChan         chan struct{}
+	unreliableWriterBuilder func() (UnreliableWriter, error)
+	unreliableWriter        UnreliableWriter
+	resultChan              chan error
+}
+
+func NewReliableWriterImplWithBuilder(ctx context.Context, writerBuilder func() (UnreliableWriter, error), config ReliableWriterConfig) (*ReliableWriterImpl, error) {
+	writer, err := writerBuilder()
+	if err != nil {
+		return nil, err
+	}
+	if writer == nil {
+		panic("UnreliableWriterBuilder returned nil")
+	}
+	rw := &ReliableWriterImpl{
+		data:                    NewScatterGatherBuffer(),
+		isComplete:              false,
+		suspendChan:             make(chan struct{}, 1),
+		writeEventsChan:         make(chan struct{}, 1),
+		resultChan:              make(chan error, 1),
+		unreliableWriterBuilder: writerBuilder,
+		unreliableWriter:        writer,
+		MaxCacheSize:            config.MaxCacheSize,
+		MinChunkSize:            config.MinChunkSize,
+		MaxChunkSize:            config.MaxChunkSize,
+	}
+	rw.launchWriting(ctx)
+	return rw, nil
 }
 
 func NewReliableWriterImpl(ctx context.Context, writer UnreliableWriter, config ReliableWriterConfig) *ReliableWriterImpl {
@@ -238,7 +264,7 @@ func (rw *ReliableWriterImpl) handleWriteEvents(ctx context.Context) (isFinished
 func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf *ScatterGatherBuffer, chunkBegin, chunkEnd int64, isLast bool) (int64, error) {
 	var totalWritten int64 = 0
 
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := 0; attempt < 5; attempt++ {
 		reader := buf.GetReader()
 
 		written, err := rw.unreliableWriter.WriteAt(ctx, chunkBegin+totalWritten, chunkEnd, reader, isLast)
@@ -249,6 +275,18 @@ func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf *
 		}
 
 		fmt.Printf("Error writing to unreliable writer (attempt %d): %v\n", attempt+1, err)
+
+		if err.HasTag(utils.TagNetwork) {
+			fmt.Println("Rebuilding writer due to network error")
+			if strings.Contains(err.Cause.Error(), "503") {
+				writer, err := rw.unreliableWriterBuilder()
+				if err != nil {
+					return totalWritten, err
+				}
+				rw.unreliableWriter = writer
+			}
+		}
+
 		if !err.HasTag(utils.TagRetryable) {
 			return totalWritten, err
 		}
@@ -259,7 +297,8 @@ func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf *
 			return totalWritten, err
 		}
 
-		buf.DropFirst(uint32(currentOff - chunkBegin))
+		buf.DropFirst(uint32(currentOff - chunkBegin - totalWritten))
+		totalWritten = currentOff - chunkBegin
 
 		if ctx.Err() != nil {
 			return totalWritten, ctx.Err()
