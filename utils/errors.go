@@ -17,7 +17,7 @@ const (
 	TagConnectionDown  = "connection-down"  // Connection is down.
 	TagTimeout         = "timeout"          // Operation timed out.
 	TagNotFound        = "not-found"        // Resource not found.
-	TagInternal        = "internal-error"   // Internal server or system error.
+	TagInternal        = "internal-error"   // Internal server or system error, same as Panic
 )
 
 // Writers Module (UnreliableProxyWriter) Error Codes

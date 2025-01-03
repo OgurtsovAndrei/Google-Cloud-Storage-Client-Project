@@ -19,7 +19,7 @@ type UnreliableGCSWriter struct {
 }
 
 var (
-	checkCancelConnThreshold int64 = 7 * 1024 * 1024
+	checkCancelConnThreshold int64 = 1 * 1024 * 1024
 )
 
 func NewUnreliableGCSWriter(ctx context.Context, bucket, objectName string) (*UnreliableGCSWriter, error) {
@@ -43,7 +43,7 @@ func NewUnreliableGCSWriter(ctx context.Context, bucket, objectName string) (*Un
 			Code:  utils.ErrCodeInitSession,
 			Msg:   "Failed to create upload session",
 			Cause: err,
-			Tags:  []string{utils.TagInternal},
+			Tags:  []string{utils.TagNetwork, utils.TagRetryable},
 		}
 	}
 
@@ -86,7 +86,7 @@ func (ugw *UnreliableGCSWriter) WriteAt(ctx context.Context, chunkBegin, chunkEn
 			Code:  utils.ErrCodeUploadChunkFailed,
 			Msg:   "Failed to upload object part",
 			Cause: err,
-			Tags:  []string{utils.TagInternal},
+			Tags:  []string{utils.TagNetwork, utils.TagRetryable},
 		}
 	}
 

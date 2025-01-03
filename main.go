@@ -30,13 +30,15 @@ func main() {
 
 	//time.Sleep(1 * time.Second)
 
-	//unreliableWriter, err := writers.NewUnreliableLocalWriter(fileName)
-	unreliableWriter, err := writers.NewUnreliableGCSWriter(ctx, bucket, fileName)
-	//cg := proxy.NewClientConnectionGroup(10, "localhost"+listenAddress, ctx, 4)
-	//unreliableWriter, err := writers.NewUnreliableProxyWriter(ctx, cg, bucket, fileName)
-	if err != nil {
-		fmt.Println("Failed to create UnreliableWriter:", err)
-		return
+	unreliableWriterBuilder := func() (writers.UnreliableWriter, error) { //unreliableWriter, err := writers.NewUnreliableLocalWriter(fileName)
+		unreliableWriter, err := writers.NewUnreliableGCSWriter(ctx, bucket, fileName)
+		//cg := proxy.NewClientConnectionGroup(10, "localhost"+listenAddress, ctx, 4)
+		//unreliableWriter, err := writers.NewUnreliableProxyWriter(ctx, cg, bucket, fileName)
+		if err != nil {
+			fmt.Println("Failed to create UnreliableWriter:", err)
+			return nil, err
+		}
+		return unreliableWriter, nil
 	}
 
 	config := writers.ReliableWriterConfig{
@@ -45,7 +47,8 @@ func main() {
 		MaxChunkSize: maxChunkSize,
 	}
 
-	rw := writers.NewReliableWriterImpl(ctx, unreliableWriter, config)
+	//rw := writers.NewReliableWriterImpl(ctx, unreliableWriter, config)
+	rw, _ := writers.NewReliableWriterImplWithBuilder(ctx, unreliableWriterBuilder, config)
 
 	// Possible chunk sizes (powers of 2 from 1 KB to 128 MB)
 	chunkSizes := []int64{
@@ -100,7 +103,7 @@ func main() {
 	}
 
 	fmt.Println("Calling Complete")
-	err = rw.Complete(ctx)
+	err := rw.Complete(ctx)
 	if err != nil {
 		fmt.Println("Error during completion:", err)
 		return

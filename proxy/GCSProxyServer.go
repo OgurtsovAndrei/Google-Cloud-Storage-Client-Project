@@ -120,7 +120,7 @@ func handleInitUploadSession(ctx context.Context, uploadSessions *map[string]*Up
 		return &utils.Error{
 			Code: utils.ErrCodeInitUploadSession,
 			Msg:  fmt.Sprintf("Failed to create a new session for %s/%s", header.Bucket, header.Object),
-			Tags: []string{utils.TagInternal},
+			Tags: []string{utils.TagNetwork},
 		}
 	}
 	(*uploadSessions)[sessionKey] = session
@@ -269,7 +269,7 @@ func handleNewChunk(ctx context.Context, connections *ClientConnectionPool, sess
 				Code:  utils.ErrCodeUploadChunkFailed,
 				Msg:   "Failed to upload chunk",
 				Cause: err,
-				Tags:  []string{utils.TagInternal},
+				Tags:  []string{utils.TagNetwork, utils.TagRetryable},
 			}
 			resp := BuildErrorResponse(header.Header.RequestUid, customErr)
 			connections.SendResponseMessage(ctx, resp)
@@ -297,7 +297,7 @@ func handleExistingChunk(session *UploadSession, header *WriteAtRequest) error {
 	if err != nil {
 		return &utils.Error{
 			Code:  utils.ErrCodeWriteAtFailed,
-			Msg:   "Failed to write to existing chunk",
+			Msg:   "Failed to write to chunk reader",
 			Cause: err,
 			Tags:  []string{utils.TagInternal},
 		}
