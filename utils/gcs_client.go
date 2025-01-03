@@ -136,7 +136,7 @@ func (c *GcsClient) UploadObjectPart(ctx context.Context, uploadUrl string, off 
 
 	resp, err := c.h.Do(req)
 	if err != nil {
-		return nil
+		return err
 	}
 	defer resp.Body.Close()
 
