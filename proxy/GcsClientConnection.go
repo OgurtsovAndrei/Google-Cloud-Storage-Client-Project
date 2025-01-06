@@ -212,12 +212,10 @@ func (cg *ClientConnectionGroup) dispatchResponse(resp *ResponseMessage) {
 }
 
 func (cg *ClientConnectionGroup) SendMessage(ctx context.Context, msg *RequestMessage) *utils.Error {
-	log.Printf("CLIENT: SendResponseMessage: Sending message with RequestUid=%d", msg.Header.RequestUid)
 	select {
 	case cg.messages <- msg:
 		cg.responseMapMutex.Lock()
 		if _, exists := cg.responseMap[msg.Header.RequestUid]; !exists {
-			log.Printf("CLIENT: SendResponseMessage: Creating response channel for RequestUid=%d", msg.Header.RequestUid)
 			cg.responseMap[msg.Header.RequestUid] = make(chan *ResponseMessage, 1)
 		}
 		cg.responseMapMutex.Unlock()
