@@ -4,6 +4,7 @@ import (
 	"awesomeProject/writers"
 	"context"
 	"fmt"
+	"log"
 	"math/rand"
 	"time"
 )
@@ -35,7 +36,7 @@ func main() {
 		//cg := proxy.NewClientConnectionGroup(10, "localhost"+listenAddress, ctx, 4)
 		//unreliableWriter, err := writers.NewUnreliableProxyWriter(ctx, cg, bucket, fileName)
 		if err != nil {
-			fmt.Println("Failed to create UnreliableWriter:", err)
+			log.Println("Failed to create UnreliableWriter:", err)
 			return nil, err
 		}
 		return unreliableWriter, nil
@@ -74,7 +75,7 @@ func main() {
 
 	rnd := rand.New(rand.NewSource(42))
 
-	fmt.Println("Starting to write 1 GB file...")
+	log.Println("Starting to write 1 GB file...")
 
 	for written := int64(0); written < totalSize; {
 		remaining := totalSize - written
@@ -94,7 +95,7 @@ func main() {
 		err := rw.WriteAt(ctx, data, written)
 
 		if err != nil {
-			fmt.Println("Error during writing:", err)
+			log.Println("Error during writing:", err)
 			rw.Abort(ctx)
 			return
 		}
@@ -102,12 +103,12 @@ func main() {
 		written += chunkSize
 	}
 
-	fmt.Println("Calling Complete")
+	log.Println("Calling Complete")
 	err := rw.Complete(ctx)
 	if err != nil {
-		fmt.Println("Error during completion:", err)
+		log.Println("Error during completion:", err)
 		return
 	}
 
-	fmt.Println("File writing completed successfully.")
+	log.Println("File writing completed successfully.")
 }

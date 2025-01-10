@@ -5,6 +5,7 @@ import (
 	"awesomeProject/utils"
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 )
@@ -91,7 +92,7 @@ func (ugw *UnreliableGCSWriter) WriteAt(ctx context.Context, chunkBegin, chunkEn
 	}
 
 	uploadSpeed := float64(size) / writeDuration / (1024 * 1024) // MB/s
-	fmt.Printf("Uploaded %d bytes at offset %d with speed %.2f MB/s\n", size, chunkBegin, uploadSpeed)
+	log.Printf("Uploaded %d bytes at offset %d with speed %.2f MB/s\n", size, chunkBegin, uploadSpeed)
 	ugw.resumeOff = chunkBegin + int64(size)
 
 	return size, nil
@@ -128,6 +129,6 @@ func (ugw *UnreliableGCSWriter) Abort(ctx context.Context) {
 	ugw.isAborted = true
 	err := ugw.gcsClient.CancelUpload(ctx, ugw.uploadUrl)
 	if err != nil {
-		fmt.Printf("Error cancelling upload session: %v\n", err)
+		log.Printf("Error cancelling upload session: %v\n", err)
 	}
 }

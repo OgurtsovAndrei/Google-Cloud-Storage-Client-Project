@@ -166,41 +166,50 @@ func (scg *ServerConnectionGroup) cleanupConnPool(clientConn *ClientConnectionPo
 }
 
 func (scg *ServerConnectionGroup) RegisterConnection(req *HandshakeRequest, conn net.Conn) *ClientConnectionPool {
+	log.Printf("SERVER: RegisterConnection: Attempting to register connection for ClientID=%s", req.ClientID)
 	scg.clientsSessionsMutex.Lock()
 	defer scg.clientsSessionsMutex.Unlock()
 
 	clientConnPool, found := scg.clientsSessions[req.ClientID]
 	if !found {
+		log.Printf("SERVER: RegisterConnection: Creating new ClientConnectionPool for ClientID=%s", req.ClientID)
 		clientConnPool = NewClientConnectionPool(req.ClientID, scg.ctx)
 		scg.clientsSessions[req.ClientID] = clientConnPool
+	} else {
+		log.Printf("SERVER: RegisterConnection: Existing ClientConnectionPool found for ClientID=%s", req.ClientID)
 	}
+
 	go clientConnPool.writeToConnGoroutine(conn, scg, req.ClientID)
 	clientConnPool.lock.Lock()
 	defer clientConnPool.lock.Unlock()
 	clientConnPool.conns[conn] = true
 	clientConnPool.nConnections++
-	log.Printf("SERVER: Client %s: registered a new connection, total=%d",
-		req.ClientID, clientConnPool.nConnections)
+	log.Printf("SERVER: RegisterConnection: Client %s registered a new connection. Total connections=%d", req.ClientID, clientConnPool.nConnections)
 
 	SendSuccessResponse(conn, req.Header.RequestUid, "OK")
+	log.Printf("SERVER: RegisterConnection: Success response sent to ClientID=%s", req.ClientID)
 	return clientConnPool
 }
 
 func (scg *ServerConnectionGroup) UnRegisterConnection(clientID string, conn net.Conn) {
+	log.Printf("SERVER: UnRegisterConnection: Unregistering connection for ClientID=%s", clientID)
 	conn.Close()
 	scg.clientsSessionsMutex.Lock()
 	clientConnPool, found := scg.clientsSessions[clientID]
 	scg.clientsSessionsMutex.Unlock()
 	if !found {
+		log.Printf("SERVER: UnRegisterConnection: No ClientConnectionPool found for ClientID=%s", clientID)
 		return
 	}
 
 	clientConnPool.lock.Lock()
 	delete(clientConnPool.conns, conn)
 	clientConnPool.nConnections--
+	log.Printf("SERVER: UnRegisterConnection: Removed connection for ClientID=%s. Remaining connections=%d", clientID, clientConnPool.nConnections)
 	clientConnPool.lock.Unlock()
 
 	if clientConnPool.nConnections == 0 {
+		log.Printf("SERVER: UnRegisterConnection: No active connections left for ClientID=%s. Cleaning up connection pool.", clientID)
 		scg.cleanupConnPool(clientConnPool)
 	}
 }
