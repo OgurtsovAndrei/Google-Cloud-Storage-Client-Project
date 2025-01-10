@@ -49,6 +49,7 @@ func (clientPool *ClientConnectionPool) writeToConnGoroutine(conn net.Conn, sgc 
 		case req := <-clientPool.messages:
 			log.Printf("SERVER: writeToConnGoroutine: Sending response for RequestUid=%d, Body=%s", req.Header.RequestUid, req.Data)
 			if _, err := io.Copy(conn, NewResponseReader(req)); err != nil {
+				clientPool.messages <- req
 				log.Printf("SERVER: writeToConnGoroutine: Error writing request: %v", err)
 				sgc.UnRegisterConnection(clientUid, conn)
 				return
