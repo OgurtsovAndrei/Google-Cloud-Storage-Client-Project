@@ -171,7 +171,7 @@ func (cg *ClientConnectionGroup) writeToConnGoroutine(conn net.Conn, writeErrCh 
 				if err != nil {
 					log.Printf("CLIENT: writeToConnGoroutine: Error writing response: %v", err)
 				}
-				cg.dispatchResponse(message)
+				cg.DispatchResponse(message)
 				return
 			}
 		case <-cg.ctx.Done():
@@ -197,7 +197,7 @@ func (cg *ClientConnectionGroup) readFromConnGoroutine(conn net.Conn, readErrCh 
 				readErrCh <- err
 				return
 			}
-			cg.dispatchResponse(resp)
+			cg.DispatchResponse(resp)
 		}
 	}
 }
