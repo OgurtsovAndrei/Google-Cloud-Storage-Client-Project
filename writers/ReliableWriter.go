@@ -276,16 +276,17 @@ func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf *
 
 		log.Printf("Error writing to unreliable writer (attempt %d): %v\n", attempt+1, err)
 
-		if err.HasTag(utils.TagNetwork) {
-			fmt.Println("Rebuilding writer due to network error")
-			if strings.Contains(err.Cause.Error(), "503") {
-				writer, err := rw.unreliableWriterBuilder()
-				if err != nil {
-					return totalWritten, err
-				}
-				rw.unreliableWriter = writer
-			}
-		}
+		// todo: replace by RepairConn call
+		//if err.HasTag(utils.TagNetwork) {
+		//	log.Println("Rebuilding writer due to network error")
+		//	if strings.Contains(err.Cause.Error(), "503") {
+		//		writer, err := rw.unreliableWriterBuilder()
+		//		if err != nil {
+		//			return totalWritten, err
+		//		}
+		//		rw.unreliableWriter = writer
+		//	}
+		//}
 
 		if !err.HasTag(utils.TagRetryable) {
 			return totalWritten, err
