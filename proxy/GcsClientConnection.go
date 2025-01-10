@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"awesomeProject/netUtils"
 	"awesomeProject/utils"
 	"context"
 	"crypto/rand"
@@ -11,6 +12,10 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+)
+
+var (
+	checkCancelConnThreshold int64 = 1 * 1024 * 1024
 )
 
 type ClientConnectionGroup struct {
@@ -65,7 +70,8 @@ func goHandleClientConnection(cg *ClientConnectionGroup, i int) {
 
 func (cg *ClientConnectionGroup) createConnection() (net.Conn, error) {
 	log.Printf("CLIENT: Creating connection to %s", cg.address)
-	return net.Dial("tcp", cg.address)
+	//return net.Dial("tcp", cg.address)
+	return netUtils.NewUnstableDialer(checkCancelConnThreshold).Dial("tcp", cg.address)
 }
 
 func (cg *ClientConnectionGroup) handleConnection(i int) error {

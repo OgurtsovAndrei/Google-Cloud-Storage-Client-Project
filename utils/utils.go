@@ -1,6 +1,8 @@
 package utils
 
 import (
+	"cloud.google.com/go/storage"
+	"context"
 	"crypto/rand"
 	"encoding/csv"
 	"encoding/json"
@@ -173,5 +175,23 @@ func AppendToJSON(fileName string, results []UploadResult) error {
 		return fmt.Errorf("failed to write to JSON file: %w", err)
 	}
 
+	return nil
+}
+
+func DeleteFileFromBucket(ctx context.Context, bucketName, fileName string) error {
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to create GCS client: %w", err)
+	}
+	defer client.Close()
+
+	bucket := client.Bucket(bucketName)
+	object := bucket.Object(fileName)
+
+	if err := object.Delete(ctx); err != nil {
+		return fmt.Errorf("failed to delete file %s from bucket %s: %w", fileName, bucketName, err)
+	}
+
+	log.Printf("File %s successfully deleted from bucket %s\n", fileName, bucketName)
 	return nil
 }
