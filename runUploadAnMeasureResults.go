@@ -22,7 +22,7 @@ var (
 )
 
 func runUploadAnMeasureResults() {
-	fmt.Printf("Running main() ...\n")
+	log.Printf("Running main() ...\n")
 	utils.CreateTmpDirectory(tmpDir)
 
 	var results []utils.UploadResult
@@ -39,10 +39,10 @@ func runUploadAnMeasureResults() {
 
 		result, err := uploadFileChunked(filePath, bucket)
 		if err != nil {
-			fmt.Printf("Failed to upload file chunked: %v\n", err)
+			log.Printf("Failed to upload file chunked: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println("File uploaded successfully!")
+		log.Println("File uploaded successfully!")
 		os.Remove(filePath)
 
 		results = append(results, result)
@@ -53,7 +53,7 @@ func runUploadAnMeasureResults() {
 	if err != nil {
 		log.Fatalf("Failed to write results to JSON file: %v", err)
 	}
-	fmt.Printf("Upload results saved to %s\n", jsonFileName)
+	log.Printf("Upload results saved to %s\n", jsonFileName)
 }
 
 func uploadFileChunked(filePath, bucket string) (utils.UploadResult, error) {
@@ -89,9 +89,9 @@ func uploadFileChunked(filePath, bucket string) (utils.UploadResult, error) {
 	chunkCount := 0
 	start := time.Now()
 
-	fmt.Printf("Starting upload of file: %s\n", filePath)
-	fmt.Printf("Target bucket: %s\n", bucket)
-	fmt.Printf("Chunk size: %d bytes (%.2f MB)\n", chunkSize, float64(chunkSize)/(1024*1024))
+	log.Printf("Starting upload of file: %s\n", filePath)
+	log.Printf("Target bucket: %s\n", bucket)
+	log.Printf("Chunk size: %d bytes (%.2f MB)\n", chunkSize, float64(chunkSize)/(1024*1024))
 
 	for {
 		readStart := time.Now()
@@ -104,8 +104,8 @@ func uploadFileChunked(filePath, bucket string) (utils.UploadResult, error) {
 		}
 
 		chunkCount++
-		fmt.Printf("Processing chunk #%d\n", chunkCount)
-		fmt.Printf("Read %d bytes from file\n", n)
+		log.Printf("Processing chunk #%d\n", chunkCount)
+		log.Printf("Read %d bytes from file\n", n)
 
 		writeStart := time.Now()
 		// Check if this is the last chunk
@@ -120,17 +120,17 @@ func uploadFileChunked(filePath, bucket string) (utils.UploadResult, error) {
 		}
 		writeDuration := time.Since(writeStart).Seconds()
 		timePeriods = append(timePeriods, writeDuration)
-		fmt.Printf("Chunk #%d written to bucket in %.2f seconds\n", chunkCount, writeDuration)
+		log.Printf("Chunk #%d written to bucket in %.2f seconds\n", chunkCount, writeDuration)
 
 		readDuration := time.Since(readStart).Seconds()
 		if readDuration < 0.05 {
-			fmt.Printf("Chunk #%d speed calculation skipped (too short read duration: %.2f seconds)\n", chunkCount, readDuration)
+			log.Printf("Chunk #%d speed calculation skipped (too short read duration: %.2f seconds)\n", chunkCount, readDuration)
 			chunkSpeeds = append(chunkSpeeds, 0)
 			continue
 		}
 
 		chunkSpeed := float64(n) / readDuration / (1024 * 1024) // MB/s
-		fmt.Printf("Chunk #%d speed: %.2f MB/s (read duration: %.2f seconds)\n", chunkCount, chunkSpeed, readDuration)
+		log.Printf("Chunk #%d speed: %.2f MB/s (read duration: %.2f seconds)\n", chunkCount, chunkSpeed, readDuration)
 
 		chunkSpeeds = append(chunkSpeeds, chunkSpeed)
 
@@ -139,8 +139,8 @@ func uploadFileChunked(filePath, bucket string) (utils.UploadResult, error) {
 	}
 
 	totalDuration := time.Since(start).Seconds()
-	fmt.Printf("Upload complete for file: %s\n", filePath)
-	fmt.Printf("Total upload time: %.2f seconds\n", totalDuration)
+	log.Printf("Upload complete for file: %s\n", filePath)
+	log.Printf("Total upload time: %.2f seconds\n", totalDuration)
 
 	return utils.UploadResult{
 		FileName:    filepath.Base(filePath),

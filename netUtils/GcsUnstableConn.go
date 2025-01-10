@@ -3,7 +3,7 @@ package netUtils
 import (
 	"context"
 	"errors"
-	"fmt"
+	"log"
 	"math/rand"
 	"net"
 	"sync"
@@ -38,11 +38,10 @@ func NewGcsUnstableConn(baseConn net.Conn, threshold int64) *GcsUnstableConn {
 func (e *GcsUnstableConn) checkThreshold(n int64) {
 	e.totalBytes += n
 	if e.totalBytes >= e.threshold {
-		println("Threshold reached")
 		e.closeMx.Lock()
 		if !e.closed {
 			if rand.Intn(cancelConnProba) == 0 {
-				fmt.Println("Injection err to connection")
+				log.Println("Injection err to connection")
 				e.cancel()
 				e.conn.Close()
 				e.closed = true

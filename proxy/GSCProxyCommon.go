@@ -345,10 +345,11 @@ func readHandshakeRequest(header RequestHeader, reader io.Reader) (*HandshakeReq
 
 func ReadRequest(reader io.Reader) (interface{}, error) {
 	header, err := readRequestHeader(reader)
-	fmt.Printf("Read 8 bytes of request header: %x\n", header)
 	if err != nil {
+		log.Printf("ReadRequest: Failed to read request header: %v  %v\n", err, header)
 		return nil, err
 	}
+	log.Printf("Read 8 bytes of request header: %x\n", header)
 
 	switch header.RequestType {
 	case MessageTypeInitConnection:
@@ -462,7 +463,7 @@ func (r *responseReader) Read(p []byte) (n int, err error) {
 }
 
 func SendSuccessResponse(conn io.Writer, requestUid uint32, message string) {
-	fmt.Printf("Sending operation success response: %s\n", message)
+	log.Printf("Sending operation success response: %s\n", message)
 	resp := BuildSucceedResponse(requestUid, message)
 
 	_, err := io.Copy(conn, NewResponseReader(&resp))

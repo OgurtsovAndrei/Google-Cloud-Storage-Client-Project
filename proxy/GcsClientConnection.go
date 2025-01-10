@@ -99,6 +99,7 @@ func (cg *ClientConnectionGroup) handleConnection(i int) error {
 		log.Printf("CLIENT: handleConnection: Write error: %v", err)
 	}
 
+	log.Println("CLIENT: handleConnection: Error received, reopening connection...")
 	var customErr *utils.Error
 	if errors.As(err, &customErr) {
 		if !customErr.HasTag(utils.TagContextCanceled) &&
@@ -184,7 +185,7 @@ func (cg *ClientConnectionGroup) readFromConnGoroutine(conn net.Conn, readErrCh 
 			return
 		default:
 			resp, err := ReadResponse(conn)
-			fmt.Printf("CLIENT: readFromConnGoroutine: Received response: %+v\n", resp)
+			log.Printf("CLIENT: readFromConnGoroutine: Received response: %+v\n", resp)
 			if err != nil {
 				log.Printf("CLIENT: readFromConnGoroutine: Error reading Data: %v", err)
 				readErrCh <- err
@@ -195,8 +196,18 @@ func (cg *ClientConnectionGroup) readFromConnGoroutine(conn net.Conn, readErrCh 
 	}
 }
 
-// dispatchResponse routes a response to the appropriate channel.
-func (cg *ClientConnectionGroup) dispatchResponse(resp *ResponseMessage) {
+// DispatchResponse dispatchResponse routes a response to the appropriate channel.
+func (cg *ClientConnectionGroup) DispatchResponse(resp *ResponseMessage) {
+	if resp.IsErr() {
+		customErr, convErr := resp.AsErr()
+		if convErr == nil {
+			if customErr.HasTag(utils.TagLogOnly) {
+				log.Printf("CLIENT: Received error response: %s", customErr.Msg)
+				return
+			}
+		}
+	}
+
 	cg.responseMapMutex.Lock()
 	defer cg.responseMapMutex.Unlock()
 
@@ -212,13 +223,13 @@ func (cg *ClientConnectionGroup) dispatchResponse(resp *ResponseMessage) {
 }
 
 func (cg *ClientConnectionGroup) SendMessage(ctx context.Context, msg *RequestMessage) *utils.Error {
+	cg.responseMapMutex.Lock()
+	if _, exists := cg.responseMap[msg.Header.RequestUid]; !exists {
+		log.Printf("CLIENT: Response channel not found for given request ID %d", msg.Header.RequestUid)
+	}
+	cg.responseMapMutex.Unlock()
 	select {
 	case cg.messages <- msg:
-		cg.responseMapMutex.Lock()
-		if _, exists := cg.responseMap[msg.Header.RequestUid]; !exists {
-			cg.responseMap[msg.Header.RequestUid] = make(chan *ResponseMessage, 1)
-		}
-		cg.responseMapMutex.Unlock()
 		return nil
 	case <-ctx.Done():
 		log.Println("CLIENT: SendResponseMessage: Context canceled")
@@ -226,18 +237,26 @@ func (cg *ClientConnectionGroup) SendMessage(ctx context.Context, msg *RequestMe
 	}
 }
 
-func (cg *ClientConnectionGroup) WaitResponse(ctx context.Context, requestUid uint32) (*ResponseMessage, *utils.Error) {
+func (cg *ClientConnectionGroup) CreateRespondChannel(RequestUid uint32) {
+	cg.responseMapMutex.Lock()
+	if _, exists := cg.responseMap[RequestUid]; !exists {
+		cg.responseMap[RequestUid] = make(chan *ResponseMessage, 1)
+	}
+	cg.responseMapMutex.Unlock()
+}
+
+func (cg *ClientConnectionGroup) WaitResponse(ctx context.Context, requestUid uint32, RequestType uint32) (*ResponseMessage, *utils.Error) {
 	cg.responseMapMutex.Lock()
 	ch, exists := cg.responseMap[requestUid]
 	cg.responseMapMutex.Unlock()
 	if !exists {
 		return nil, &utils.Error{
 			Code: utils.ErrCodeResponseChannelNotFound,
-			Msg:  "CLIENT: Response channel not found for given request ID",
+			Msg:  fmt.Sprintf("CLIENT: Response channel not found for given request ID %d", requestUid),
 			Tags: []string{utils.TagIllegalArgument},
 		}
 	}
-	fmt.Println("CLIENT: Waiting for response... for request - " + fmt.Sprint(requestUid))
+	log.Println("CLIENT: Waiting for response... for request - " + fmt.Sprint(requestUid) + " of type - " + fmt.Sprint(RequestType))
 	select {
 	case <-ctx.Done():
 		return nil, utils.CastContextError(ctx.Err())
