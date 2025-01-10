@@ -18,6 +18,7 @@ const (
 	TagTimeout         = "timeout"          // Operation timed out.
 	TagNotFound        = "not-found"        // Resource not found.
 	TagInternal        = "internal-error"   // Internal server or system error, same as Panic
+	TagLogOnly         = "log-only"         // Error should only be logged, no further action.
 )
 
 // Writers Module (UnreliableProxyWriter) Error Codes
