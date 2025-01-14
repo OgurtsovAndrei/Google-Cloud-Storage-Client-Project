@@ -34,7 +34,7 @@ func runUploadObj(self *cobra.Command, args []string) (err error) {
 		return errors.New("destination bucket must be specified")
 	}
 
-	c, err := NewGcsClient(ctx)
+	c, err := NewGcsClient(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -68,7 +68,7 @@ func runUploadMultipartObj(self *cobra.Command, args []string) (err error) {
 		return errors.New("destination bucket must be specified")
 	}
 
-	c, err := NewGcsClient(ctx)
+	c, err := NewGcsClient(ctx, nil)
 	if err != nil {
 		return err
 	}

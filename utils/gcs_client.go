@@ -19,10 +19,16 @@ import (
 )
 
 type GcsClient struct {
-	h http.Client
+	h             http.Client
+	errorInjector ErrorInjector
 }
 
-func NewGcsClient(ctx context.Context) (c *GcsClient, err error) {
+type ErrorInjector interface {
+	ShouldInjectError() bool
+	GetError() error
+}
+
+func NewGcsClient(ctx context.Context, injector ErrorInjector) (*GcsClient, error) {
 	creds, err := google.FindDefaultCredentials(ctx, storage.ScopeFullControl)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load the credentials: %w", err)
@@ -37,13 +43,24 @@ func NewGcsClient(ctx context.Context) (c *GcsClient, err error) {
 		return nil, fmt.Errorf("failed to build the transport: %w", err)
 	}
 
-	c = &GcsClient{
-		h: http.Client{Transport: tr},
+	return &GcsClient{
+		h:             http.Client{Transport: tr},
+		errorInjector: injector,
+	}, nil
+}
+
+func (c *GcsClient) maybeInjectError() error {
+	if c.errorInjector != nil && c.errorInjector.ShouldInjectError() {
+		return c.errorInjector.GetError()
 	}
-	return c, nil
+	return nil
 }
 
 func (c *GcsClient) UploadObject(ctx context.Context, bucket, name string, reader io.Reader) error {
+	if err := c.maybeInjectError(); err != nil {
+		return err
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.objectUrl(bucket, name), reader)
 	if err != nil {
 		return err
@@ -62,6 +79,10 @@ func (c *GcsClient) UploadObject(ctx context.Context, bucket, name string, reade
 }
 
 func (c *GcsClient) NewUploadSession(ctx context.Context, bucket, name string) (uploadUrl string, err error) {
+	if err := c.maybeInjectError(); err != nil {
+		return "", err
+	}
+
 	args := saveJson(raw.Object{
 		Bucket: bucket,
 		Name:   name,
@@ -93,6 +114,10 @@ func (c *GcsClient) NewUploadSession(ctx context.Context, bucket, name string) (
 }
 
 func (c *GcsClient) UploadObjectPart(ctx context.Context, uploadUrl string, off int64, reader io.Reader, size int64, last bool) error {
+	if err := c.maybeInjectError(); err != nil {
+		return err
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadUrl, reader)
 	if err != nil {
 		return err
@@ -132,6 +157,9 @@ func (c *GcsClient) UploadObjectPart(ctx context.Context, uploadUrl string, off 
 }
 
 func (c *GcsClient) GetResumeOffset(ctx context.Context, uploadUrl string) (off int64, complete bool, err error) {
+	if err := c.maybeInjectError(); err != nil {
+		return 0, false, err
+	}
 	req, err := http.NewRequestWithContext(ctx,
 		http.MethodPut, uploadUrl,
 		nil)
@@ -185,6 +213,10 @@ func (c *GcsClient) parseOffsetResponse(resp *http.Response) (off int64, complet
 }
 
 func (c *GcsClient) CancelUpload(ctx context.Context, uploadUrl string) (err error) {
+	if err := c.maybeInjectError(); err != nil {
+		return err
+	}
+
 	req, err := http.NewRequestWithContext(ctx,
 		http.MethodDelete, uploadUrl,
 		nil)

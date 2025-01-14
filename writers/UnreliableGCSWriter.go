@@ -1,12 +1,13 @@
 package writers
 
 import (
+	"awesomeProject/retrier"
 	"awesomeProject/utils"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
-	"time"
 )
 
 type UnreliableGCSWriter struct {
@@ -16,10 +17,12 @@ type UnreliableGCSWriter struct {
 	isAborted  bool
 	bucket     string
 	objectName string
+	//for testing
+	writeHook func(data []byte, offset int64)
 }
 
-func NewUnreliableGCSWriter(ctx context.Context, bucket, objectName string) (*UnreliableGCSWriter, error) {
-	gcsClient, err := utils.NewGcsClient(ctx)
+func NewUnreliableGCSWriter(ctx context.Context, bucket, objectName string, injector utils.ErrorInjector) (*UnreliableGCSWriter, error) {
+	gcsClient, err := utils.NewGcsClient(ctx, injector)
 	if err != nil {
 		return nil, err
 	}
@@ -38,30 +41,35 @@ func NewUnreliableGCSWriter(ctx context.Context, bucket, objectName string) (*Un
 }
 
 func (ugw *UnreliableGCSWriter) WriteAt(ctx context.Context, chunkBegin, chunkEnd int64, reader io.Reader, isLast bool) (int64, error) {
-
 	if ugw.isAborted {
-		return 0, errors.New("operation aborted")
+		return 0, &retrier.GCSError{Code: 499, Message: "operation aborted"}
 	}
+
 	if chunkBegin != ugw.resumeOff {
-		msg := fmt.Sprintf("WriteAt called on chunkBegin %d, but resumeOff is %d", chunkBegin, ugw.resumeOff)
-		fmt.Printf(msg)
-		return 0, errors.New(msg)
+		return 0, &retrier.GCSError{
+			Code:    400,
+			Message: fmt.Sprintf("invalid offset: expected %d, got %d", ugw.resumeOff, chunkBegin),
+		}
 	}
+
 	size := chunkEnd - chunkBegin
 
-	writeStart := time.Now()
-	err := ugw.gcsClient.UploadObjectPart(ctx, ugw.uploadUrl, chunkBegin, reader, size, isLast)
-	writeDuration := time.Since(writeStart).Seconds()
+	// for testing: if we have a hook, read the data and call the hook
+	if ugw.writeHook != nil {
+		data, err := io.ReadAll(reader)
+		if err != nil {
+			return 0, err
+		}
+		ugw.writeHook(data, chunkBegin)
+		reader = bytes.NewReader(data)
+	}
 
+	err := ugw.gcsClient.UploadObjectPart(ctx, ugw.uploadUrl, chunkBegin, reader, size, isLast)
 	if err != nil {
-		ugw.resumeOff = chunkBegin
 		return 0, err
 	}
 
-	uploadSpeed := float64(size) / writeDuration / (1024 * 1024) // MB/s
-	fmt.Printf("Uploaded %d bytes at offset %d with speed %.2f MB/s\n", size, chunkBegin, uploadSpeed)
-	ugw.resumeOff = chunkBegin + int64(size)
-
+	ugw.resumeOff = chunkEnd
 	return size, nil
 }
 
