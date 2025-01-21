@@ -1,10 +1,12 @@
 package writers
 
 import (
+	"awesomeProject/retrier"
 	"context"
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
 
 type ReliableWriterConfig struct {
@@ -27,6 +29,7 @@ type ReliableWriterImpl struct {
 	writeEventsChan  chan struct{}
 	unreliableWriter UnreliableWriter
 	resultChan       chan error
+	retryConfig      retrier.RetryConfig
 }
 
 func NewReliableWriterImpl(ctx context.Context, writer UnreliableWriter, config ReliableWriterConfig) *ReliableWriterImpl {
@@ -40,6 +43,13 @@ func NewReliableWriterImpl(ctx context.Context, writer UnreliableWriter, config 
 		MaxCacheSize:     config.MaxCacheSize,
 		MinChunkSize:     config.MinChunkSize,
 		MaxChunkSize:     config.MaxChunkSize,
+		retryConfig: retrier.RetryConfig{
+			MaxRetries:      5,
+			InitialInterval: 1 * time.Second,
+			MaxInterval:     10 * time.Second,
+			Multiplier:      2.0,
+			MaxJitter:       500 * time.Millisecond,
+		},
 	}
 	rw.launchWriting(ctx)
 	return rw
@@ -122,29 +132,56 @@ func (rw *ReliableWriterImpl) Complete(ctx context.Context) error {
 	}
 
 	rw.notifyWriteEvent()
-	var err error
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err = <-rw.resultChan:
-	}
+
+	// Add retry for the final validation
+	err := retrier.RetryWithBackoff(ctx, "validate_completion", rw.retryConfig, func(attempt int) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err := <-rw.resultChan:
+			if err != nil {
+				return retrier.NewRetryableError(err, true, "validate_completion", attempt)
+			}
+			return nil
+		}
+	})
+
 	if err != nil {
-		return fmt.Errorf("writing failed: %w", err)
+		return fmt.Errorf("writing failed after retries: %w", err)
 	}
-	fmt.Println("Write operation completed.")
 
 	if !rw.data.IsEmpty() {
 		panic("Not all written")
 	}
+
+	//retry for final offset
+	var finalOffset int64
+	err = retrier.RetryWithBackoff(ctx, "get_final_offset", rw.retryConfig, func(attempt int) error {
+		var err error
+		finalOffset, err = rw.unreliableWriter.GetResumeOffset(ctx)
+		if err != nil {
+			return retrier.NewRetryableError(err, true, "get_final_offset", attempt)
+		}
+		return nil
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to get final offset: %w", err)
+	}
+
 	fmt.Printf("Written at reliable writer: %d bytes\n", rw.writtenBytes)
-	offset, err := rw.unreliableWriter.GetResumeOffset(ctx)
-	fmt.Printf("Written at unreliable writer: %d bytes\n", offset)
+	fmt.Printf("Written at unreliable writer: %d bytes\n", finalOffset)
 
 	return nil
 }
 
 func (rw *ReliableWriterImpl) Abort(ctx context.Context) {
-	rw.unreliableWriter.Abort(ctx)
+	// retry for abort
+	_ = retrier.RetryWithBackoff(ctx, "abort_operation", rw.retryConfig, func(attempt int) error {
+		rw.unreliableWriter.Abort(ctx)
+		return nil
+	})
+
 	rw.mutex.Lock()
 	rw.isComplete = false
 	rw.isAborted = true
@@ -235,24 +272,33 @@ func (rw *ReliableWriterImpl) handleWriteEvents(ctx context.Context) (isFinished
 func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf *ScatterGatherBuffer, chunkBegin, chunkEnd int64, isLast bool) (int64, error) {
 	var totalWritten int64 = 0
 
-	for attempt := 0; attempt < 3; attempt++ {
+	err := retrier.RetryWithBackoff(ctx, "write_chunk", rw.retryConfig, func(attempt int) error {
 		reader := buf.GetPipeReader()
 
 		written, err := rw.unreliableWriter.WriteAt(ctx, chunkBegin+totalWritten, chunkEnd, reader, isLast)
-		totalWritten += written
-
-		if err == nil {
-			return totalWritten, nil
+		if err != nil {
+			return retrier.NewRetryableError(err, true, "write_chunk", attempt)
 		}
 
-		fmt.Printf("Error writing to unreliable writer (attempt %d): %v\n", attempt+1, err)
-
+		totalWritten += written
 		buf.DropFirst(uint32(written))
 
-		if ctx.Err() != nil {
-			return totalWritten, ctx.Err()
+		if totalWritten < chunkEnd-chunkBegin {
+			return retrier.NewRetryableError(
+				fmt.Errorf("partial write: %d/%d bytes", totalWritten, chunkEnd-chunkBegin),
+				true,
+				"write_chunk",
+				attempt,
+			)
 		}
+
+		return nil
+	})
+
+	if err != nil {
+		fmt.Printf("Error writing chunk (after retries): %v\n", err)
+		return totalWritten, err
 	}
 
-	return totalWritten, errors.New("failed to write after 3 attempts")
+	return totalWritten, nil
 }
