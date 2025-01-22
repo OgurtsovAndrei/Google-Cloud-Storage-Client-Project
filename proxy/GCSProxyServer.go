@@ -27,137 +27,91 @@ type UploadSession struct {
 	totalBytesUploaded int64
 	uploadStartTime    time.Time
 	uploadEndTime      time.Time
+
+	chunkLock            sync.Mutex
+	currentChunkBeginOff int64
+	currentChunkEndOff   int64
+	currentChunk         *utils.BuildableBuffer
 }
 
-func StartGCSProxyServer(ctx context.Context, listenAddress string) error {
-	var (
-		uploadSessions = make(map[string]*UploadSession)
-		mutex          sync.Mutex
-	)
+type GcsProxyServer struct {
+	connectionGroup *ServerConnectionGroup
+	uploadSessions  map[string]*UploadSession
+	mutex           sync.Mutex
+	ctx             context.Context
+}
 
-	listener, err := net.Listen("tcp", listenAddress)
+func NewGcsProxyServer(ctx context.Context, address string) *GcsProxyServer {
+	proxy := GcsProxyServer{
+		uploadSessions: make(map[string]*UploadSession),
+		ctx:            ctx,
+	}
+	connectionGroup, err := NewServerConnectionGroup(address, ctx, func(ctx context.Context, r interface{}, conn net.Conn) error {
+		return proxy.handleRequest(ctx, r, conn)
+	})
 	if err != nil {
-		return fmt.Errorf("error starting server: %w", err)
+		panic(err)
 	}
-	fmt.Printf("GCSProxyServer listening on %s\n", listenAddress)
+	proxy.connectionGroup = connectionGroup
+	return &proxy
+}
 
-	go func() {
-		<-ctx.Done()
-		_ = listener.Close()
-		fmt.Println("GCSProxyServer has been shut down.")
-	}()
-
-	for {
-		conn, err := listener.Accept()
+func (proxyServer *GcsProxyServer) handleRequest(ctx context.Context, r interface{}, respondConn io.Writer) error {
+	switch req := r.(type) {
+	case *InitUploadSessionRequest:
+		fmt.Println("Processing InitUploadSessionRequest:", req)
+		err := handleInitConnection(ctx, &proxyServer.uploadSessions, &proxyServer.mutex, *req)
 		if err != nil {
-			select {
-			case <-ctx.Done():
-				return nil
-			default:
-				fmt.Printf("Error accepting connection: %v\n", err)
-				continue
-			}
+			SendErrorResponse(respondConn, req.Header.RequestUid, err)
+			return err
 		}
-		go handleConnection(ctx, conn, &uploadSessions, &mutex)
+		SendSuccessResponse(respondConn, req.Header.RequestUid, fmt.Sprintf("OK"))
+		return nil
+	case *GetResumeOffsetRequest:
+		fmt.Println("Processing GetResumeOffsetRequest:", req)
+		off, err := handleGetResumeOffset(&proxyServer.uploadSessions, &proxyServer.mutex, req)
+		if err != nil {
+			SendErrorResponse(respondConn, req.Header.RequestUid, err)
+			return err
+		}
+		SendSuccessResponse(respondConn, req.Header.RequestUid, fmt.Sprintf("%d", off))
+		return nil
+	case *WriteAtRequest:
+		fmt.Println("Processing WriteAtRequest:", req)
+		// todo fix handleWriteAt
+		//err := handleWriteAt(proxyServer.ctx, respondConn, &proxyServer.uploadSessions, &proxyServer.mutex, req)
+		//if err != nil {
+		//	SendErrorResponse(respondConn, req.Header.RequestUid, err)
+		//	return err
+		//}
+		return nil
+	case *AbortRequest:
+		fmt.Println("Processing AbortRequest:", req)
+		err := handleAbort(&proxyServer.uploadSessions, &proxyServer.mutex, req)
+		if err != nil {
+			SendErrorResponse(respondConn, req.Header.RequestUid, err)
+			return err
+		}
+		SendSuccessResponse(respondConn, req.Header.RequestUid, fmt.Sprintf("OK"))
+		return nil
+	default:
+		return errors.New("unknown request type")
 	}
 }
 
-func handleConnection(ctx context.Context, conn net.Conn, uploadSessions *map[string]*UploadSession, uploadSessionsMutex *sync.Mutex) {
-	defer conn.Close()
-
-	var header RequestHeader
-	if err := binary.Read(conn, binary.BigEndian, &header); err != nil {
-		sendErrorResponse(conn, 0, fmt.Errorf("failed to read request header: %w", err))
-		return
-	}
-
-	if header.RequestType != MessageTypeInitConnection {
-		sendErrorResponse(conn, header.RequestUid, errors.New("first request must be init connection request"))
-		return
-	}
-
-	session, sessionKey, err := handleInitConnection(ctx, conn, uploadSessions, uploadSessionsMutex, header)
-	if err != nil {
-		sendErrorResponse(conn, header.RequestUid, err)
-		return
-	}
-
-	sendSuccessResponse(conn, header.RequestUid, "") // Send success response for connection initialization only.
-
-	for {
-		var reqHeader RequestHeader
-		if err := binary.Read(conn, binary.BigEndian, &reqHeader); err != nil {
-			if err == io.EOF {
-				break
-			}
-			sendErrorResponse(conn, 0, fmt.Errorf("failed to read request header: %w", err))
-			return
-		}
-
-		var err error
-		switch reqHeader.RequestType {
-		case MessageTypeUploadPart:
-			err = handleWriteAt(session.sessionCtx, conn, session, reqHeader)
-		case MessageTypeGetResumeOffset:
-			err = handleGetResumeOffset(conn, session, reqHeader)
-		case MessageTypeAbort:
-			err = handleAbort(session)
-		default:
-			err = fmt.Errorf("unknown request type: %d", reqHeader.RequestType)
-		}
-
-		if err != nil {
-			sendErrorResponse(conn, reqHeader.RequestUid, err)
-		} else {
-			sendSuccessResponse(conn, reqHeader.RequestUid, fmt.Sprintf("OK for %s", RequestTypeToString(reqHeader.RequestType)))
-		}
-	}
-
-	uploadSessionsMutex.Lock()
-	session.activeConnections--
-	if session.activeConnections == 0 && (session.isAborted || session.isCompleted) {
-		session.cancelFunc()
-		_ = session.gcsClient.CancelUpload(ctx, session.uploadUrl)
-		delete(*uploadSessions, sessionKey)
-	}
-	uploadSessionsMutex.Unlock()
-}
-
-func handleInitConnection(ctx context.Context, conn net.Conn, uploadSessions *map[string]*UploadSession, uploadSessionsMutex *sync.Mutex, header RequestHeader) (*UploadSession, string, error) {
-	var initReq InitUploadSessionHeader
-	if err := binary.Read(conn, binary.BigEndian, &initReq); err != nil {
-		return nil, "", fmt.Errorf("failed to read InitUploadSessionHeader: %w", err)
-	}
-
-	bucketNameBytes := make([]byte, initReq.BucketNameLength)
-	if _, err := io.ReadFull(conn, bucketNameBytes); err != nil {
-		return nil, "", fmt.Errorf("failed to read bucket name: %w", err)
-	}
-	bucketName := string(bucketNameBytes)
-
-	objectNameBytes := make([]byte, initReq.ObjectNameLength)
-	if _, err := io.ReadFull(conn, objectNameBytes); err != nil {
-		return nil, "", fmt.Errorf("failed to read object name: %w", err)
-	}
-	objectName := string(objectNameBytes)
-
-	sessionKey := bucketName + "/" + objectName
+func handleInitConnection(ctx context.Context, uploadSessions *map[string]*UploadSession, uploadSessionsMutex *sync.Mutex, header InitUploadSessionRequest) error {
+	sessionKey := header.Bucket + "/" + header.Object
 
 	uploadSessionsMutex.Lock()
 	defer uploadSessionsMutex.Unlock()
 
-	session, exists := (*uploadSessions)[sessionKey]
-	if !exists {
-		var failed bool
-		session, failed = createNewSession(ctx, uploadSessionsMutex, bucketName, objectName, uploadSessions, sessionKey)
-		if failed {
-			return nil, "", fmt.Errorf("failed to create a new session for %s/%s", bucketName, objectName)
-		}
-	} else {
-		session.activeConnections++
+	session, failed := createNewSession(ctx, uploadSessionsMutex, header.Bucket, header.Object, uploadSessions, sessionKey)
+	if failed {
+		return fmt.Errorf("failed to create a new session for %s/%s", header.Bucket, header.Object)
 	}
+	(*uploadSessions)[sessionKey] = session
 
-	return session, sessionKey, nil
+	return nil
 }
 
 func createNewSession(ctx context.Context, uploadSessionsMutex *sync.Mutex, bucketName string, objectName string, uploadSessions *map[string]*UploadSession, sessionKey string) (*UploadSession, bool) {
@@ -165,14 +119,12 @@ func createNewSession(ctx context.Context, uploadSessionsMutex *sync.Mutex, buck
 
 	gcsClient, err := utils.NewGcsClient(sessionCtx)
 	if err != nil {
-		uploadSessionsMutex.Unlock()
 		fmt.Printf("Failed to create GCS client: %v\n", err)
 		cancelFunc()
 		return nil, true
 	}
 	uploadUrl, err := gcsClient.NewUploadSession(sessionCtx, bucketName, objectName)
 	if err != nil {
-		uploadSessionsMutex.Unlock()
 		fmt.Printf("Failed to create upload session: %v\n", err)
 		cancelFunc()
 		return nil, true
@@ -183,7 +135,7 @@ func createNewSession(ctx context.Context, uploadSessionsMutex *sync.Mutex, buck
 		resumeOffset:      0,
 		isAborted:         false,
 		isCompleted:       false,
-		activeConnections: 1,
+		activeConnections: 0,
 		bucketName:        bucketName,
 		objectName:        objectName,
 		sessionCtx:        sessionCtx,
@@ -214,7 +166,7 @@ func createNewSession(ctx context.Context, uploadSessionsMutex *sync.Mutex, buck
 	return session, false
 }
 
-func handleWriteAt(ctx context.Context, conn net.Conn, session *UploadSession, header RequestHeader) error {
+/*func handleWriteAt(ctx context.Context, conn net.Conn, session *UploadSession, header RequestHeader) error {
 	var writeAtReq WriteAtRequestHeader
 	if err := binary.Read(conn, binary.BigEndian, &writeAtReq); err != nil {
 		return fmt.Errorf("failed to read WriteAtRequestHeader: %w", err)
@@ -260,14 +212,24 @@ func handleWriteAt(ctx context.Context, conn net.Conn, session *UploadSession, h
 		fmt.Printf("Total uploaded: %d bytes in %.2f seconds (Average speed: %.2f MB/s)\n",
 			session.totalBytesUploaded, totalUploadTime.Seconds(), averageSpeed/(1024*1024))
 	}
-
 	return nil
-}
+}*/
 
-func handleGetResumeOffset(conn net.Conn, session *UploadSession, header RequestHeader) error {
+// func handleGetResumeOffset(conn net.Conn, session *UploadSession, header RequestHeader) error {
+func handleGetResumeOffset(uploadSessions *map[string]*UploadSession, uploadSessionsMutex *sync.Mutex, header *GetResumeOffsetRequest) (int64, error) {
+	sessionKey := header.Bucket + "/" + header.Object
+
+	uploadSessionsMutex.Lock()
+	session, exists := (*uploadSessions)[sessionKey]
+	uploadSessionsMutex.Unlock()
+
+	if !exists {
+		return -1, fmt.Errorf("upload session for %s/%s not found", header.Bucket, header.Object)
+	}
+
 	gcsOffset, complete, err := session.gcsClient.GetResumeOffset(session.sessionCtx, session.uploadUrl)
 	if err != nil {
-		return fmt.Errorf("failed to get resume offset from GCS: %w", err)
+		return -1, fmt.Errorf("failed to get resume offset from GCS: %w", err)
 	}
 
 	if complete {
@@ -275,15 +237,20 @@ func handleGetResumeOffset(conn net.Conn, session *UploadSession, header Request
 	}
 
 	session.resumeOffset = gcsOffset
-
-	if err := binary.Write(conn, binary.BigEndian, gcsOffset); err != nil {
-		return fmt.Errorf("failed to send resume offset: %w", err)
-	}
-
-	return nil
+	return gcsOffset, nil
 }
 
-func handleAbort(session *UploadSession) error {
+func handleAbort(uploadSessions *map[string]*UploadSession, uploadSessionsMutex *sync.Mutex, header *AbortRequest) error {
+	sessionKey := header.Bucket + "/" + header.Object
+
+	uploadSessionsMutex.Lock()
+	session, exists := (*uploadSessions)[sessionKey]
+	uploadSessionsMutex.Unlock()
+
+	if !exists {
+		return fmt.Errorf("upload session for %s/%s not found", header.Bucket, header.Object)
+	}
+
 	session.isAborted = true
 	session.cancelFunc()
 
@@ -295,31 +262,4 @@ func handleAbort(session *UploadSession) error {
 	}
 
 	return nil
-}
-
-func sendSuccessResponse(conn net.Conn, seqNum uint32, message string) {
-	fmt.Printf("Sending operation success response: %s\n", message)
-	resp := ResponseHeader{
-		RequestUid:    seqNum,
-		StatusCode:    0,
-		MessageLength: uint32(len(message)),
-	}
-	_ = binary.Write(conn, binary.BigEndian, &resp)
-	_, _ = conn.Write([]byte(message))
-}
-
-func sendErrorResponse(conn net.Conn, seqNum uint32, err error) {
-	if err == nil {
-		sendSuccessResponse(conn, seqNum, "")
-		return
-	}
-
-	msg := err.Error()
-	resp := ResponseHeader{
-		RequestUid:    seqNum,
-		StatusCode:    1,
-		MessageLength: uint32(len(msg)),
-	}
-	_ = binary.Write(conn, binary.BigEndian, &resp)
-	_, _ = conn.Write([]byte(msg))
 }
