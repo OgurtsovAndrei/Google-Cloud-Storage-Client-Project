@@ -138,23 +138,25 @@ func (sgb *ScatterGatherBuffer) IsEmpty() bool {
 	return sgb.size == 0
 }
 
-func (sgb *ScatterGatherBuffer) GetPipeReader() *io.PipeReader {
-	reader, writer := io.Pipe()
+func (sgb *ScatterGatherBuffer) Read(p []byte) (n int, err error) {
+	if sgb.buffer.Len() == 0 {
+		return 0, io.EOF
+	}
 
-	go func() {
-		defer writer.Close()
+	var totalRead int
+	for totalRead < len(p) && sgb.buffer.Len() > 0 {
+		chunk := sgb.buffer.PopFront()
+		toCopy := copy(p[totalRead:], chunk)
 
-		for i := 0; i < sgb.buffer.Len(); i++ {
-			chunk := sgb.buffer.At(i)
-			_, err := writer.Write(chunk)
-			if err != nil {
-				_ = writer.CloseWithError(err)
-				return
-			}
+		totalRead += toCopy
+
+		if toCopy < len(chunk) {
+			sgb.buffer.PushFront(chunk[toCopy:])
+			break
 		}
-	}()
+	}
 
-	return reader
+	return totalRead, nil
 }
 
 func (sgb *ScatterGatherBuffer) DropFirst(amount uint32) {
@@ -174,4 +176,45 @@ func (sgb *ScatterGatherBuffer) DropFirst(amount uint32) {
 	}
 
 	sgb.size -= dropped
+}
+
+func (sgb *ScatterGatherBuffer) TakeFirstUnsafe(n uint32) *ScatterGatherBuffer {
+	resultSGB := NewScatterGatherBuffer()
+	var taken uint32
+
+	for taken < n && !sgb.IsEmpty() {
+		front := sgb.buffer.PopFront()
+		frontLen := uint32(len(front))
+
+		if taken+frontLen <= n {
+			resultSGB.AddBytes(front)
+			taken += frontLen
+		} else {
+			remaining := n - taken
+			resultSGB.AddBytes(front[:remaining])
+			sgb.buffer.PushFront(front[remaining:])
+			taken += remaining
+		}
+	}
+
+	sgb.size -= taken
+	resultSGB.checkSize()
+	sgb.checkSize()
+
+	return &resultSGB
+}
+
+func (sgb *ScatterGatherBuffer) SplitByParts(size uint32) []*ScatterGatherBuffer {
+	if size == 0 {
+		panic("Size cannot be zero")
+	}
+
+	var result []*ScatterGatherBuffer
+
+	for !sgb.IsEmpty() {
+		part := sgb.TakeFirstUnsafe(min(size, sgb.size))
+		result = append(result, part)
+	}
+
+	return result
 }
