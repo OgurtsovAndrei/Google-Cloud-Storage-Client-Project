@@ -3,7 +3,9 @@ package writers
 import (
 	"context"
 	"errors"
+	"io"
 	"log"
+	"strings"
 	"sync/atomic"
 
 	"awesomeProject/proxy"
@@ -116,40 +118,32 @@ func NewUnreliableProxyWriter(ctx context.Context, cg *proxy.ClientConnectionGro
 //	return n, nil
 //}
 
-//func (upw *UnreliableProxyWriter) GetResumeOffset(ctx context.Context) (int64, error) {
-//	if upw.isAborted {
-//		return 0, errors.New("operation aborted")
-//	}
-//	upw.sequenceNumber++
-//
-//	header := proxy.RequestHeader{
-//		RequestUid:  upw.sequenceNumber,
-//		RequestType: proxy.MessageTypeGetResumeOffset,
-//		RequestSize: 0,
-//	}
-//
-//	buf := new(bytes.Buffer)
-//	if err := binary.Write(buf, binary.BigEndian, &header); err != nil {
-//		return 0, fmt.Errorf("failed to write request header: %w", err)
-//	}
-//
-//	conn := upw.connection
-//	if _, err := conn.Write(buf.Bytes()); err != nil {
-//		return 0, fmt.Errorf("failed to write GetResumeOffset request: %w", err)
-//	}
-//
-//	var resumeOffset int64
-//	if err := binary.Read(conn, binary.BigEndian, &resumeOffset); err != nil {
-//		return 0, fmt.Errorf("failed to read resume offset: %w", err)
-//	}
-//
-//	if err := upw.receiveResponse(); err != nil {
-//		return 0, err
-//	}
-//
-//	upw.currentOffset = resumeOffset
-//	return resumeOffset, nil
-//}
+func (w *UnreliableProxyWriter) GetResumeOffset(ctx context.Context) (int64, error) {
+	req := &proxy.GetResumeOffsetRequest{
+		Header: proxy.RequestHeader{
+			RequestUid:  atomic.AddUint32(&w.uid, 1),
+			RequestType: proxy.MessageTypeGetResumeOffset,
+		},
+		GetResumeOffsetHeader: proxy.GetResumeOffsetHeader{
+			BucketNameLength: uint32(len(w.bucket)),
+			ObjectNameLength: uint32(len(w.object)),
+		},
+		Bucket: w.bucket,
+		Object: w.object,
+	}
+	message := req.ToRequestMessage()
+	if err := w.cg.SendMessage(ctx, &message); err != nil {
+		return 0, err
+	}
+	resp, err := w.cg.WaitResponse(ctx, req.Header.RequestUid)
+	if err != nil {
+		return 0, err
+	}
+	if resp.Header.StatusCode != 0 {
+		return 0, errors.New("failed to get resume offset")
+	}
+	return parseOffset(strings.NewReader(resp.Data))
+}
 
 func (w *UnreliableProxyWriter) Abort(ctx context.Context) {
 	req := &proxy.AbortRequest{
@@ -189,6 +183,18 @@ func (w *UnreliableProxyWriter) Abort(ctx context.Context) {
 //
 //	return nil
 //}
+
+func parseOffset(data io.Reader) (int64, error) {
+	var offset int64
+	buf := make([]byte, 8)
+	if _, err := data.Read(buf); err != nil {
+		return 0, err
+	}
+	for _, b := range buf {
+		offset = offset*10 + int64(b-'0')
+	}
+	return offset, nil
+}
 
 func boolToByte(val bool) byte {
 	if val {
