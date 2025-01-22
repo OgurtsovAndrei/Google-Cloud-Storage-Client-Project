@@ -178,7 +178,7 @@ func (sgb *ScatterGatherBuffer) DropFirst(amount uint32) {
 	sgb.size -= dropped
 }
 
-func (sgb *ScatterGatherBuffer) takeFirstUnsafe(n uint32) *ScatterGatherBuffer {
+func (sgb *ScatterGatherBuffer) TakeFirstUnsafe(n uint32) *ScatterGatherBuffer {
 	resultSGB := NewScatterGatherBuffer()
 	var taken uint32
 
@@ -212,7 +212,7 @@ func (sgb *ScatterGatherBuffer) SplitByParts(size uint32) []*ScatterGatherBuffer
 	var result []*ScatterGatherBuffer
 
 	for !sgb.IsEmpty() {
-		part := sgb.takeFirstUnsafe(min(size, sgb.size))
+		part := sgb.TakeFirstUnsafe(min(size, sgb.size))
 		result = append(result, part)
 	}
 

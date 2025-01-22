@@ -28,9 +28,9 @@ type ResponseHeader struct {
 }
 
 type RequestMessage struct {
-	RequestHeader      RequestHeader
-	SecondHeaderReader io.Reader
-	Data               io.Reader
+	Header       RequestHeader
+	SecondHeader io.Reader
+	Data         io.Reader
 }
 
 type ResponseMessage struct {
@@ -92,6 +92,14 @@ type WriteAtRequest struct {
 	Data          io.Reader
 }
 
+func encodeString(str string) []byte {
+	length := uint32(len(str))
+	buf := new(bytes.Buffer)
+	_ = binary.Write(buf, binary.BigEndian, length)
+	buf.WriteString(str)
+	return buf.Bytes()
+}
+
 func (req *WriteAtRequest) ToRequestMessage() RequestMessage {
 	buf := new(bytes.Buffer)
 
@@ -102,12 +110,12 @@ func (req *WriteAtRequest) ToRequestMessage() RequestMessage {
 	dataBytes := req.Bucket + req.Object
 
 	return RequestMessage{
-		RequestHeader: RequestHeader{
+		Header: RequestHeader{
 			RequestUid:  req.Header.RequestUid,
 			RequestType: MessageTypeUploadPart,
 		},
-		SecondHeaderReader: buf,
-		Data:               io.MultiReader(strings.NewReader(dataBytes), req.Data),
+		SecondHeader: buf,
+		Data:         io.MultiReader(strings.NewReader(dataBytes), req.Data),
 	}
 }
 
@@ -120,12 +128,12 @@ func (req *InitUploadSessionRequest) ToRequestMessage() RequestMessage {
 
 	dataBytes := req.Bucket + req.Object
 	return RequestMessage{
-		RequestHeader: RequestHeader{
+		Header: RequestHeader{
 			RequestUid:  req.Header.RequestUid,
 			RequestType: MessageTypeInitConnection,
 		},
-		SecondHeaderReader: buf,
-		Data:               strings.NewReader(dataBytes),
+		SecondHeader: buf,
+		Data:         strings.NewReader(dataBytes),
 	}
 }
 
@@ -137,12 +145,12 @@ func (req *GetResumeOffsetRequest) ToRequestMessage() RequestMessage {
 
 	dataBytes := req.Bucket + req.Object
 	return RequestMessage{
-		RequestHeader: RequestHeader{
+		Header: RequestHeader{
 			RequestUid:  req.Header.RequestUid,
 			RequestType: MessageTypeGetResumeOffset,
 		},
-		SecondHeaderReader: buf,
-		Data:               strings.NewReader(dataBytes),
+		SecondHeader: buf,
+		Data:         strings.NewReader(dataBytes),
 	}
 }
 
@@ -154,12 +162,12 @@ func (req *AbortRequest) ToRequestMessage() RequestMessage {
 
 	dataBytes := req.Bucket + req.Object
 	return RequestMessage{
-		RequestHeader: RequestHeader{
+		Header: RequestHeader{
 			RequestUid:  req.Header.RequestUid,
 			RequestType: MessageTypeAbort,
 		},
-		SecondHeaderReader: buf,
-		Data:               strings.NewReader(dataBytes),
+		SecondHeader: buf,
+		Data:         strings.NewReader(dataBytes),
 	}
 }
 

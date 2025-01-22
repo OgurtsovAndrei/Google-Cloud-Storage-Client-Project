@@ -24,10 +24,10 @@ func NewRequestReader(req *RequestMessage) io.Reader {
 	log.Println("NewResponseReader: Create Request Reader")
 
 	headerBuf := new(bytes.Buffer)
-	_ = binary.Write(headerBuf, binary.BigEndian, req.RequestHeader)
+	_ = binary.Write(headerBuf, binary.BigEndian, req.Header)
 	return &requestReader{
 		headerBuffer:  headerBuf,
-		secondHeader:  req.SecondHeaderReader,
+		secondHeader:  req.SecondHeader,
 		data:          req.Data,
 		currentReader: headerBuf,
 	}
@@ -193,7 +193,7 @@ func (cg *ClientConnectionGroup) readFromConn(conn net.Conn, readErrCh chan<- er
 		default:
 			var resp ResponseMessage
 			if err := binary.Read(conn, binary.BigEndian, &resp.Header); err != nil {
-				log.Printf("readFromConn: Error reading RequestHeader: %v", err)
+				log.Printf("readFromConn: Error reading Header: %v", err)
 				readErrCh <- err
 				return
 			}
@@ -226,7 +226,7 @@ func (cg *ClientConnectionGroup) writeToConn(conn net.Conn, writeErrCh chan<- er
 	for {
 		select {
 		case req := <-cg.messages:
-			log.Printf("writeToConn: Sending request for RequestUid=%d", req.RequestHeader.RequestUid)
+			log.Printf("writeToConn: Sending request for RequestUid=%d", req.Header.RequestUid)
 			if _, err := io.Copy(conn, NewRequestReader(req)); err != nil {
 				log.Printf("writeToConn: Error writing request: %v", err)
 				writeErrCh <- err
@@ -269,13 +269,13 @@ func (cg *ClientConnectionGroup) handleConnection() error {
 }
 
 func (cg *ClientConnectionGroup) SendMessage(ctx context.Context, msg *RequestMessage) error {
-	log.Printf("SendMessage: Sending message with RequestUid=%d", msg.RequestHeader.RequestUid)
+	log.Printf("SendMessage: Sending message with RequestUid=%d", msg.Header.RequestUid)
 	select {
 	case cg.messages <- msg:
 		cg.ResponseMapMutex.Lock()
-		if _, exists := cg.ResponseMap[msg.RequestHeader.RequestUid]; !exists {
-			log.Printf("SendMessage: Creating response channel for RequestUid=%d", msg.RequestHeader.RequestUid)
-			cg.ResponseMap[msg.RequestHeader.RequestUid] = make(chan *ResponseMessage, 1)
+		if _, exists := cg.ResponseMap[msg.Header.RequestUid]; !exists {
+			log.Printf("SendMessage: Creating response channel for RequestUid=%d", msg.Header.RequestUid)
+			cg.ResponseMap[msg.Header.RequestUid] = make(chan *ResponseMessage, 1)
 		}
 		cg.ResponseMapMutex.Unlock()
 		return nil
