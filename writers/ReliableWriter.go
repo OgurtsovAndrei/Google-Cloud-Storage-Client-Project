@@ -271,9 +271,15 @@ func (rw *ReliableWriterImpl) handleWriteEvents(ctx context.Context) (isFinished
 
 func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf *ScatterGatherBuffer, chunkBegin, chunkEnd int64, isLast bool) (int64, error) {
 	var totalWritten int64 = 0
+	// copy of original buffer
+	originalData := buf
 
 	err := retrier.RetryWithBackoff(ctx, "write_chunk", rw.retryConfig, func(attempt int) error {
-		reader := buf.GetPipeReader()
+		remainingData := originalData
+		if totalWritten > 0 {
+			remainingData.DropFirst(uint32(totalWritten))
+		}
+		reader := remainingData.GetPipeReader()
 
 		written, err := rw.unreliableWriter.WriteAt(ctx, chunkBegin+totalWritten, chunkEnd, reader, isLast)
 		if err != nil {
