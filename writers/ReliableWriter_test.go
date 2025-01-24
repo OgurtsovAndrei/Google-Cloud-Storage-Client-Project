@@ -19,6 +19,8 @@ type mockUnreliableWriter struct {
 	failureCount    int
 	simulatePartial bool
 	writtenBytes    int64
+	abortFunc       func() error
+	offsetFunc      func() error
 }
 
 func (m *mockUnreliableWriter) WriteAt(ctx context.Context, chunkBegin, chunkEnd int64, reader io.Reader, isLast bool) (int64, error) {
@@ -208,5 +210,23 @@ func TestReliableWriter_ConcurrentRetries(t *testing.T) {
 	expectedBytes := int64(writeSize * concurrentWrites)
 	if mock.writtenBytes != expectedBytes {
 		t.Errorf("Expected %d total bytes written, got %d", expectedBytes, mock.writtenBytes)
+	}
+}
+
+func TestReliableWriter_AbortRetries(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	mock := &mockUnreliableWriter{}
+	writer := NewReliableWriterImpl(ctx, mock, ReliableWriterConfig{
+		MaxCacheSize: 8 * 1024 * 1024,
+		MinChunkSize: 1024 * 1024,
+		MaxChunkSize: 4 * 1024 * 1024,
+	})
+
+	writer.Abort(ctx)
+
+	if len(mock.abortAttempts) != 1 {
+		t.Errorf("Expected 1 abort attempt, got %d", len(mock.abortAttempts))
 	}
 }
