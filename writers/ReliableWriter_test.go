@@ -19,8 +19,6 @@ type mockUnreliableWriter struct {
 	failureCount    int
 	simulatePartial bool
 	writtenBytes    int64
-	abortFunc       func() error
-	offsetFunc      func() error
 }
 
 func (m *mockUnreliableWriter) WriteAt(ctx context.Context, chunkBegin, chunkEnd int64, reader io.Reader, isLast bool) (int64, error) {
