@@ -36,6 +36,14 @@ type RetryableError struct {
 	Attempt   int
 }
 
+type HTTPResponseError struct {
+	Response *http.Response
+}
+
+func (e *HTTPResponseError) Error() string {
+	return fmt.Sprintf("HTTP error: status code %d", e.Response.StatusCode)
+}
+
 func (e *RetryableError) Error() string {
 	return fmt.Sprintf("%s failed (attempt %d): %v (retriable: %v)",
 		e.Operation, e.Attempt, e.Err, e.Retriable)
@@ -71,8 +79,7 @@ func RetryWithBackoff(ctx context.Context, op string, config RetryConfig, fn fun
 			return fmt.Errorf("operation %s failed after %d attempts: %v", op, attempt+1, err)
 		}
 
-		// Add jitter to prevent thundering herd
-		jitter := time.Duration(float64(config.MaxJitter) * (0.5 + rand.Float64()))
+		jitter := time.Duration(float64(config.MaxJitter) * rand.Float64())
 		backoff := interval + jitter
 
 		select {
@@ -84,10 +91,12 @@ func RetryWithBackoff(ctx context.Context, op string, config RetryConfig, fn fun
 				Attempt:   attempt,
 			}
 		case <-time.After(backoff):
-			interval = time.Duration(float64(interval) * config.Multiplier)
-			if interval > config.MaxInterval {
-				interval = config.MaxInterval
-			}
+		}
+
+		// Calculate next interval after waiting
+		interval = time.Duration(float64(interval) * config.Multiplier)
+		if interval > config.MaxInterval {
+			interval = config.MaxInterval
 		}
 	}
 	return nil
@@ -108,9 +117,9 @@ func IsRetryableError(err error) bool {
 		return netErr.Temporary() || netErr.Timeout()
 	}
 
-	var httpRespErr *http.Response
+	var httpRespErr *HTTPResponseError
 	if errors.As(err, &httpRespErr) {
-		code := httpRespErr.StatusCode
+		code := httpRespErr.Response.StatusCode
 		return code >= 500 || code == 429 || code == 408
 	}
 

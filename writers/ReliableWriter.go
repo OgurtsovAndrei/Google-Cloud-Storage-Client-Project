@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 )
@@ -30,6 +31,12 @@ type ReliableWriterImpl struct {
 	unreliableWriter UnreliableWriter
 	resultChan       chan error
 	retryConfig      retrier.RetryConfig
+	pendingWrites    []writeRequest
+}
+
+type writeRequest struct {
+	offset uint64
+	data   []byte
 }
 
 func NewReliableWriterImpl(ctx context.Context, writer UnreliableWriter, config ReliableWriterConfig) *ReliableWriterImpl {
@@ -91,13 +98,27 @@ func (rw *ReliableWriterImpl) WriteAt(ctx context.Context, buf []byte, off int64
 	if rw.isComplete {
 		return errors.New("write operation is already completed")
 	}
-	if rw.writtenBytes != uint64(off) {
-		return errors.New("buffer size mismatch")
-	}
 
 	rw.mutex.Lock()
-	rw.data.AddBytes(buf)
-	rw.writtenBytes += uint64(len(buf))
+	rw.pendingWrites = append(rw.pendingWrites, writeRequest{
+		offset: uint64(off),
+		data:   buf,
+	})
+
+	sort.Slice(rw.pendingWrites, func(i, j int) bool {
+		return rw.pendingWrites[i].offset < rw.pendingWrites[j].offset
+	})
+
+	for len(rw.pendingWrites) > 0 {
+		next := rw.pendingWrites[0]
+		if next.offset != rw.writtenBytes {
+			break
+		}
+
+		rw.data.AddBytes(next.data)
+		rw.writtenBytes += uint64(len(next.data))
+		rw.pendingWrites = rw.pendingWrites[1:]
+	}
 	rw.mutex.Unlock()
 
 	rw.notifyWriteEvent()
