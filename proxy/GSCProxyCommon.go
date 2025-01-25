@@ -591,7 +591,7 @@ func buildBasicErrorResponse(requestUid uint32, err error) *ResponseMessage {
 	}
 }
 
-func ReadResponse(reader io.Reader) (*ResponseMessage, error) {
+func ReadResponse(reader io.Reader) (*ResponseMessage, *utils.Error) {
 	log.Println("ReadResponse: Starting to read response header")
 
 	// Read the response header
@@ -599,9 +599,19 @@ func ReadResponse(reader io.Reader) (*ResponseMessage, error) {
 	err := binary.Read(reader, binary.BigEndian, &header)
 	if err != nil {
 		if err == io.EOF {
-			return nil, io.EOF // End of stream
+			return nil, &utils.Error{
+				Code:  utils.EndOfStreamError,
+				Msg:   "end of stream",
+				Cause: err,
+				Tags:  []string{utils.TagEOF, utils.TagNetwork},
+			}
 		}
-		return nil, fmt.Errorf("failed to read response header: %w", err)
+		return nil, &utils.Error{
+			Code:  utils.HeaderReadFailedError,
+			Msg:   "failed to read response header",
+			Cause: err,
+			Tags:  []string{utils.TagNetwork, utils.TagIOError, utils.TagConnectionDown},
+		}
 	}
 	log.Printf("ReadResponse: Successfully read response header: %+v", header)
 
@@ -609,7 +619,12 @@ func ReadResponse(reader io.Reader) (*ResponseMessage, error) {
 	data := make([]byte, header.DataLength)
 	_, err = io.ReadFull(reader, data)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response data: %w", err)
+		return nil, &utils.Error{
+			Code:  utils.DataReadFailedError,
+			Msg:   "failed to read response data",
+			Cause: err,
+			Tags:  []string{utils.TagIOError, utils.TagNetwork},
+		}
 	}
 	log.Printf("ReadResponse: Successfully read response data \\ header = %+v", header)
 

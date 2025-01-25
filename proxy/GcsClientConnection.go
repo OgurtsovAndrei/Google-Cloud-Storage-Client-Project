@@ -169,6 +169,8 @@ func (cg *ClientConnectionGroup) writeToConnGoroutine(conn net.Conn, writeErrCh 
 					Cause: err,
 					Tags:  tags,
 				}
+
+				writeErrCh <- &myErr
 				message, err := ErrorToResponseMessage(req.Header.RequestUid, &myErr)
 				if err != nil {
 					log.Printf("CLIENT: writeToConnGoroutine: Error writing response: %v", err)
@@ -250,8 +252,7 @@ func (cg *ClientConnectionGroup) SendMessage(ctx context.Context, msg *RequestMe
 	case cg.messages <- msg:
 		return nil
 	case <-ctx.Done():
-		log.Println("CLIENT: SendResponseMessage: Context canceled")
-		return utils.CastContextError(ctx.Err())
+		return nil // ignore context cancellation, as error is already reported
 	}
 }
 
