@@ -124,8 +124,10 @@ func NewServerConnectionGroup(address string, ctx context.Context, handleRequest
 				}
 
 				var clientConnectionPool *ClientConnectionPool
+				var request *HandshakeRequest
 				switch req := r.(type) {
 				case *HandshakeRequest:
+					request = req
 					clientConnectionPool = scg.RegisterConnection(req, conn)
 				default:
 					log.Printf("SERVER: NewServerConnectionGroup: Error ReadRequest: %v", err)
@@ -133,7 +135,7 @@ func NewServerConnectionGroup(address string, ctx context.Context, handleRequest
 				}
 
 				scg.wg.Add(1)
-				go goHandleServerConnection(conn, scg, clientConnectionPool)
+				go goHandleServerConnection(conn, scg, clientConnectionPool, request)
 			}
 		}
 	}()
@@ -141,10 +143,10 @@ func NewServerConnectionGroup(address string, ctx context.Context, handleRequest
 	return scg, nil
 }
 
-func goHandleServerConnection(c net.Conn, scg *ServerConnectionGroup, connPool *ClientConnectionPool) {
+func goHandleServerConnection(c net.Conn, scg *ServerConnectionGroup, connPool *ClientConnectionPool, req *HandshakeRequest) {
 	defer scg.wg.Done()
 	defer c.Close()
-	scg.handleConnection(c, connPool)
+	scg.handleConnection(c, connPool, req)
 }
 
 func (scg *ServerConnectionGroup) cleanupConnPool(clientConn *ClientConnectionPool) {
@@ -181,10 +183,10 @@ func (scg *ServerConnectionGroup) RegisterConnection(req *HandshakeRequest, conn
 	}
 
 	clientConnPool.lock.Lock()
-	defer clientConnPool.lock.Unlock()
 	clientConnPool.conns[conn] = true
 	clientConnPool.nConnections++
 	log.Printf("SERVER: RegisterConnection: Client %s registered a new connection. Total connections=%d", req.ClientID, clientConnPool.nConnections)
+	clientConnPool.lock.Unlock()
 
 	SendSuccessResponse(conn, req.Header.RequestUid, "OK")
 	log.Printf("SERVER: RegisterConnection: Success response sent to ClientID=%s", req.ClientID)
@@ -221,7 +223,7 @@ func (scg *ServerConnectionGroup) UnRegisterConnection(clientID string, conn net
 	}
 }
 
-func (scg *ServerConnectionGroup) handleConnection(conn net.Conn, connPool *ClientConnectionPool) {
+func (scg *ServerConnectionGroup) handleConnection(conn net.Conn, connPool *ClientConnectionPool, req *HandshakeRequest) {
 	log.Printf("SERVER: handleConnection: Starting to process new connection from %s", conn.RemoteAddr().String())
 
 	for {
@@ -237,6 +239,7 @@ func (scg *ServerConnectionGroup) handleConnection(conn net.Conn, connPool *Clie
 				} else {
 					log.Printf("SERVER: handleConnection: Error reading request: %v", err)
 				}
+				scg.UnRegisterConnection(req.ClientID, conn)
 				return
 			}
 
