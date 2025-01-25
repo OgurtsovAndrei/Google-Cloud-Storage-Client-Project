@@ -264,7 +264,11 @@ func (rw *ReliableWriterImpl) handleWriteEvents(ctx context.Context) (isFinished
 func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf *ScatterGatherBuffer, chunkBegin, chunkEnd int64, isLast bool) (int64, error) {
 	var totalWritten int64 = 0
 
-	for attempt := 0; attempt < 5; attempt++ {
+	for attempt := 0; attempt < 10; attempt++ {
+		if totalWritten == chunkEnd-chunkBegin {
+			return totalWritten, nil
+		}
+
 		reader := buf.GetReader()
 
 		log.Printf("Attempting to write from offset %d to %d\n", chunkBegin+totalWritten, chunkEnd)
@@ -309,5 +313,5 @@ func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf *
 		}
 	}
 
-	return totalWritten, errors.New("failed to write after 3 attempts")
+	return totalWritten, errors.New("failed to write after 10 attempts")
 }
