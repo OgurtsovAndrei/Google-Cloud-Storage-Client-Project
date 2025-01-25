@@ -24,6 +24,8 @@ var (
 
 func main() {
 
+	rand.Seed(1)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
@@ -48,7 +50,7 @@ func main() {
 
 	unreliableWriterBuilder := func() (writers.UnreliableWriter, error) { //unreliableWriter, err := writers.NewUnreliableLocalWriter(fileName)
 		//unreliableWriter, err := writers.NewUnreliableGCSWriter(ctx, bucket, fileName)
-		cg := proxy.NewClientConnectionGroup(10, "localhost"+listenAddress, ctx, 4)
+		cg := proxy.NewClientConnectionGroup(10, "localhost"+listenAddress, ctx, 1)
 		unreliableWriter, err := writers.NewUnreliableProxyWriter(ctx, cg, bucket, fileName)
 		if err != nil {
 			log.Println("Failed to create UnreliableWriter:", err)
