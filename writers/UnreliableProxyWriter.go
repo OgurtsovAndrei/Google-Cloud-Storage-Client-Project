@@ -1,21 +1,18 @@
 package writers
 
 import (
+	"awesomeProject/proxy"
+	"awesomeProject/utils"
 	"context"
-	"errors"
 	"io"
 	"log"
 	"strings"
-	"sync/atomic"
-
-	"awesomeProject/proxy"
 )
 
 type UnreliableProxyWriter struct {
 	cg     *proxy.ClientConnectionGroup
 	bucket string
 	object string
-	uid    uint32
 }
 
 func NewUnreliableProxyWriter(ctx context.Context, cg *proxy.ClientConnectionGroup, bucket, object string) (*UnreliableProxyWriter, error) {
@@ -24,9 +21,10 @@ func NewUnreliableProxyWriter(ctx context.Context, cg *proxy.ClientConnectionGro
 		bucket: bucket,
 		object: object,
 	}
+
 	req := &proxy.InitUploadSessionRequest{
 		Header: proxy.RequestHeader{
-			RequestUid:  atomic.AddUint32(&w.uid, 1),
+			RequestUid:  cg.NextUid(),
 			RequestType: proxy.MessageTypeInitConnection,
 		},
 		InitUploadSessionHeader: proxy.InitUploadSessionHeader{
@@ -36,26 +34,55 @@ func NewUnreliableProxyWriter(ctx context.Context, cg *proxy.ClientConnectionGro
 		Bucket: bucket,
 		Object: object,
 	}
+
 	msg := req.ToRequestMessage()
-	log.Printf("Sending init connetction message...")
+	log.Printf("Sending init connection message...")
+
 	if err := cg.SendMessage(ctx, &msg); err != nil {
-		return nil, err
+		return nil, &utils.Error{
+			Code:  utils.ErrCodeSendMessage,
+			Msg:   "Failed to send init connection message",
+			Cause: err,
+			Tags:  []string{utils.TagNetwork, utils.TagRetryable},
+		}
 	}
-	log.Printf("Waiting for init connetction response...")
+
 	resp, err := w.cg.WaitResponse(ctx, req.Header.RequestUid)
 	if err != nil {
-		return nil, err
+		return nil, &utils.Error{
+			Code:  utils.ErrCodeWaitResponse,
+			Msg:   "Failed to receive init connection response",
+			Cause: err,
+			Tags:  []string{utils.TagNetwork, utils.TagRetryable},
+		}
 	}
-	if resp.Header.StatusCode != 0 {
-		return nil, errors.New("failed to initialize upload session")
+
+	if resp.IsErr() {
+		customErr, convErr := resp.AsErr()
+		if convErr == nil {
+			return nil, customErr
+		}
+		return nil, &utils.Error{
+			Code:  utils.ErrCodeInitSession,
+			Msg:   "Failed to deserialize server error response",
+			Cause: convErr,
+			Tags:  []string{utils.TagInternal},
+		}
 	}
+
 	return w, nil
 }
 
-func (w *UnreliableProxyWriter) WriteAt(ctx context.Context, chunkBegin, chunkEnd int64, reader *ScatterGatherBuffer, isLast bool) (int64, error) {
+func (w *UnreliableProxyWriter) WriteAt(
+	ctx context.Context,
+	chunkBegin, chunkEnd int64,
+	reader *ScatterGatherBuffer,
+	isLast bool,
+) (int64, *utils.Error) {
+
 	var maxPartSize uint32 = 1 * 1024 * 1024
 	parts := reader.SplitByParts(maxPartSize)
-	requestId := atomic.AddUint32(&w.uid, 1)
+	requestId := w.cg.NextUid()
 
 	var off int64 = chunkBegin
 	for _, part := range parts {
@@ -80,7 +107,9 @@ func (w *UnreliableProxyWriter) WriteAt(ctx context.Context, chunkBegin, chunkEn
 
 		off += int64(part.size)
 		message := req.ToRequestMessage()
-		if err := w.cg.SendMessage(ctx, &message); err != nil {
+
+		err := w.cg.SendMessage(ctx, &message)
+		if err != nil {
 			return 0, err
 		}
 	}
@@ -89,16 +118,22 @@ func (w *UnreliableProxyWriter) WriteAt(ctx context.Context, chunkBegin, chunkEn
 	if err != nil {
 		return 0, err
 	}
-	if resp.Header.StatusCode != 0 {
-		return 0, errors.New("failed to write data to proxy")
+
+	if resp.IsErr() {
+		customErr, convErr := resp.AsErr()
+		if convErr == nil {
+			return 0, customErr
+		}
+		return 0, convErr
 	}
+
 	return chunkEnd - chunkBegin, nil
 }
 
-func (w *UnreliableProxyWriter) GetResumeOffset(ctx context.Context) (int64, error) {
+func (w *UnreliableProxyWriter) GetResumeOffset(ctx context.Context) (int64, *utils.Error) {
 	req := &proxy.GetResumeOffsetRequest{
 		Header: proxy.RequestHeader{
-			RequestUid:  atomic.AddUint32(&w.uid, 1),
+			RequestUid:  w.cg.NextUid(),
 			RequestType: proxy.MessageTypeGetResumeOffset,
 		},
 		GetResumeOffsetHeader: proxy.GetResumeOffsetHeader{
@@ -108,24 +143,47 @@ func (w *UnreliableProxyWriter) GetResumeOffset(ctx context.Context) (int64, err
 		Bucket: w.bucket,
 		Object: w.object,
 	}
+
 	message := req.ToRequestMessage()
 	if err := w.cg.SendMessage(ctx, &message); err != nil {
-		return 0, err
+		return 0, &utils.Error{
+			Code:  utils.ErrCodeSendMessage,
+			Msg:   "Failed to send resume offset request",
+			Cause: err,
+			Tags:  []string{utils.TagNetwork, utils.TagRetryable},
+		}
 	}
+
 	resp, err := w.cg.WaitResponse(ctx, req.Header.RequestUid)
 	if err != nil {
-		return 0, err
+		return 0, &utils.Error{
+			Code:  utils.ErrCodeWaitResponse,
+			Msg:   "Failed to get resume offset response",
+			Cause: err,
+			Tags:  []string{utils.TagNetwork, utils.TagRetryable},
+		}
 	}
-	if resp.Header.StatusCode != 0 {
-		return 0, errors.New("failed to get resume offset")
+
+	if resp.IsErr() {
+		customErr, convErr := resp.AsErr()
+		if convErr == nil {
+			return 0, customErr
+		}
+		return 0, convErr
 	}
-	return parseOffset(strings.NewReader(resp.Data))
+
+	off, parseErr := parseOffset(strings.NewReader(resp.Data))
+	if parseErr != nil {
+		return 0, parseErr
+	}
+
+	return off, nil
 }
 
 func (w *UnreliableProxyWriter) Abort(ctx context.Context) {
 	req := &proxy.AbortRequest{
 		Header: proxy.RequestHeader{
-			RequestUid:  atomic.AddUint32(&w.uid, 1),
+			RequestUid:  w.cg.NextUid(),
 			RequestType: proxy.MessageTypeAbort,
 		},
 		AbortHeader: proxy.AbortHeader{
@@ -135,16 +193,22 @@ func (w *UnreliableProxyWriter) Abort(ctx context.Context) {
 		Bucket: w.bucket,
 		Object: w.object,
 	}
+
 	message := req.ToRequestMessage()
 	_ = w.cg.SendMessage(ctx, &message)
 	_, _ = w.cg.WaitResponse(ctx, req.Header.RequestUid)
 }
 
-func parseOffset(data io.Reader) (int64, error) {
+func parseOffset(data io.Reader) (int64, *utils.Error) {
 	var offset int64
 	buf := make([]byte, 8)
 	if _, err := data.Read(buf); err != nil {
-		return 0, err
+		return 0, &utils.Error{
+			Code:  utils.ErrCodeParseOffset,
+			Msg:   "Failed to read offset from response data",
+			Cause: err,
+			Tags:  []string{utils.TagIllegalArgument},
+		}
 	}
 	for _, b := range buf {
 		offset = offset*10 + int64(b-'0')

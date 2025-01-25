@@ -159,6 +159,17 @@ func (sgb *ScatterGatherBuffer) Read(p []byte) (n int, err error) {
 	return totalRead, nil
 }
 
+func (sgb *ScatterGatherBuffer) GetReader() *ScatterGatherBuffer {
+	readerSGB := NewScatterGatherBuffer()
+	readerSGB.size = sgb.size
+
+	for i := 0; i < sgb.buffer.Len(); i++ {
+		readerSGB.buffer.PushBack(sgb.buffer.At(i))
+	}
+
+	return &readerSGB
+}
+
 func (sgb *ScatterGatherBuffer) DropFirst(amount uint32) {
 	var dropped uint32
 

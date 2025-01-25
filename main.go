@@ -11,7 +11,7 @@ import (
 
 var (
 	bucket               = "another-eu-1-reg-bucket-finland"
-	sizeMB               = 256
+	sizeMB               = 128
 	totalSize            = int64(sizeMB * 1024 * 1024)
 	fileName             = "1GB_output_file.dat"
 	maxCacheSize  uint32 = 64 * 1024 * 1024
@@ -33,7 +33,7 @@ func main() {
 
 	//unreliableWriter, err := writers.NewUnreliableLocalWriter(fileName)
 	//unreliableWriter, err := writers.NewUnreliableGCSWriter(ctx, bucket, fileName)
-	cg := proxy.NewConnectionGroup(10, "localhost"+listenAddress, ctx, 4)
+	cg := proxy.NewClientConnectionGroup(10, "localhost"+listenAddress, ctx, 4)
 	unreliableWriter, err := writers.NewUnreliableProxyWriter(ctx, cg, bucket, fileName)
 	if err != nil {
 		fmt.Println("Failed to create UnreliableProxyWriter:", err)

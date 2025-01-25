@@ -1,6 +1,7 @@
 package writers
 
 import (
+	"awesomeProject/utils"
 	"context"
 	"errors"
 	"fmt"
@@ -217,7 +218,7 @@ func (rw *ReliableWriterImpl) handleWriteEvents(ctx context.Context) (isFinished
 		chunkBegin := int64(rw.offset)
 		chunkEnd := chunkBegin + int64(buf.size)
 
-		written, err := rw.attemptWriteWithRetries(ctx, buf, chunkBegin, chunkEnd, isLast)
+		written, err := rw.attemptWriteWithRetries(ctx, buf.GetReader(), chunkBegin, chunkEnd, isLast)
 		if err != nil {
 			fmt.Println("Failed to write after retries:", err)
 			rw.Abort(ctx)
@@ -237,18 +238,27 @@ func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf *
 	var totalWritten int64 = 0
 
 	for attempt := 0; attempt < 3; attempt++ {
-		reader := buf
+		reader := buf.GetReader()
 
 		written, err := rw.unreliableWriter.WriteAt(ctx, chunkBegin+totalWritten, chunkEnd, reader, isLast)
-		totalWritten += written
 
 		if err == nil {
+			totalWritten += written
 			return totalWritten, nil
 		}
 
 		fmt.Printf("Error writing to unreliable writer (attempt %d): %v\n", attempt+1, err)
+		if !err.HasTag(utils.TagRetryable) {
+			return totalWritten, err
+		}
 
-		buf.DropFirst(uint32(written))
+		currentOff, err := rw.unreliableWriter.GetResumeOffset(ctx)
+
+		if err != nil {
+			return totalWritten, err
+		}
+
+		buf.DropFirst(uint32(currentOff - chunkBegin))
 
 		if ctx.Err() != nil {
 			return totalWritten, ctx.Err()
