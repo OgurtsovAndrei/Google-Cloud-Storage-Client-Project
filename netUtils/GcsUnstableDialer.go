@@ -20,7 +20,7 @@ func (d *GcsUnstableDialer) Dial(network, address string) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewGcsUnstableConn(baseConn, d.threshold), nil
+	return NewGcsUnstableConn(NewGcsThreadSafeConn(baseConn), d.threshold), nil
 }
 
 func (d *GcsUnstableDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
@@ -28,5 +28,5 @@ func (d *GcsUnstableDialer) DialContext(ctx context.Context, network, address st
 	if err != nil {
 		return nil, err
 	}
-	return NewGcsUnstableConn(baseConn, d.threshold), nil
+	return NewGcsUnstableConn(NewGcsThreadSafeConn(baseConn), d.threshold), nil
 }
