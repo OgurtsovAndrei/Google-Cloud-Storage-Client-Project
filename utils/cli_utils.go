@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/spf13/cobra"
+	"log"
 )
 
 var rootCmd = &cobra.Command{
@@ -91,7 +92,7 @@ func runUploadMultipartObj(self *cobra.Command, args []string) (err error) {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("GetResumeOffset() = %d, %t\n", testOff, testLast)
+	log.Printf("GetResumeOffset() = %d, %t\n", testOff, testLast)
 
 	if err = c.UploadObjectPart(ctx, uploadUrl, off, bytes.NewReader(buf[:chunkSize]), chunkSize, true); err != nil {
 		return err
@@ -101,7 +102,7 @@ func runUploadMultipartObj(self *cobra.Command, args []string) (err error) {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("GetResumeOffset() = %d, %t\n", testOff, testLast)
+	log.Printf("GetResumeOffset() = %d, %t\n", testOff, testLast)
 
 	return nil
 }

@@ -1,10 +1,10 @@
 package main
 
 import (
-	"awesomeProject/proxy"
 	"awesomeProject/writers"
 	"context"
 	"fmt"
+	"log"
 	"math/rand"
 	"time"
 )
@@ -25,19 +25,21 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	go func() {
-		_ = proxy.NewGcsProxyServer(ctx, listenAddress)
-	}()
+	//go func() {
+	//	_ = proxy.NewGcsProxyServer(ctx, listenAddress)
+	//}()
 
-	time.Sleep(1 * time.Second)
+	//time.Sleep(1 * time.Second)
 
-	//unreliableWriter, err := writers.NewUnreliableLocalWriter(fileName)
-	//unreliableWriter, err := writers.NewUnreliableGCSWriter(ctx, bucket, fileName)
-	cg := proxy.NewClientConnectionGroup(10, "localhost"+listenAddress, ctx, 4)
-	unreliableWriter, err := writers.NewUnreliableProxyWriter(ctx, cg, bucket, fileName)
-	if err != nil {
-		fmt.Println("Failed to create UnreliableProxyWriter:", err)
-		return
+	unreliableWriterBuilder := func() (writers.UnreliableWriter, error) { //unreliableWriter, err := writers.NewUnreliableLocalWriter(fileName)
+		unreliableWriter, err := writers.NewUnreliableGCSWriter(ctx, bucket, fileName)
+		//cg := proxy.NewClientConnectionGroup(10, "localhost"+listenAddress, ctx, 4)
+		//unreliableWriter, err := writers.NewUnreliableProxyWriter(ctx, cg, bucket, fileName)
+		if err != nil {
+			log.Println("Failed to create UnreliableWriter:", err)
+			return nil, err
+		}
+		return unreliableWriter, nil
 	}
 
 	config := writers.ReliableWriterConfig{
@@ -46,7 +48,8 @@ func main() {
 		MaxChunkSize: maxChunkSize,
 	}
 
-	rw := writers.NewReliableWriterImpl(ctx, unreliableWriter, config)
+	//rw := writers.NewReliableWriterImpl(ctx, unreliableWriter, config)
+	rw, _ := writers.NewReliableWriterImplWithBuilder(ctx, unreliableWriterBuilder, config)
 
 	// Possible chunk sizes (powers of 2 from 1 KB to 128 MB)
 	chunkSizes := []int64{
@@ -72,7 +75,7 @@ func main() {
 
 	rnd := rand.New(rand.NewSource(42))
 
-	fmt.Println("Starting to write 1 GB file...")
+	log.Println("Starting to write 1 GB file...")
 
 	for written := int64(0); written < totalSize; {
 		remaining := totalSize - written
@@ -92,7 +95,7 @@ func main() {
 		err := rw.WriteAt(ctx, data, written)
 
 		if err != nil {
-			fmt.Println("Error during writing:", err)
+			log.Println("Error during writing:", err)
 			rw.Abort(ctx)
 			return
 		}
@@ -100,12 +103,12 @@ func main() {
 		written += chunkSize
 	}
 
-	fmt.Println("Calling Complete")
-	err = rw.Complete(ctx)
+	log.Println("Calling Complete")
+	err := rw.Complete(ctx)
 	if err != nil {
-		fmt.Println("Error during completion:", err)
+		log.Println("Error during completion:", err)
 		return
 	}
 
-	fmt.Println("File writing completed successfully.")
+	log.Println("File writing completed successfully.")
 }

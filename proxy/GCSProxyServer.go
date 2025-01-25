@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"sync"
 	"time"
 
@@ -58,7 +59,7 @@ func NewGcsProxyServer(ctx context.Context, address string) *GcsProxyServer {
 func (proxyServer *GcsProxyServer) handleRequest(ctx context.Context, r interface{}, connections *ClientConnectionPool) error {
 	switch req := r.(type) {
 	case *InitUploadSessionRequest:
-		fmt.Println("Processing InitUploadSessionRequest:", req)
+		log.Println("SERVER: Processing InitUploadSessionRequest:", req)
 		err := handleInitUploadSession(ctx, &proxyServer.uploadSessions, &proxyServer.mutex, *req)
 		if err != nil {
 			resp := BuildErrorResponse(req.Header.RequestUid, err)
@@ -69,7 +70,7 @@ func (proxyServer *GcsProxyServer) handleRequest(ctx context.Context, r interfac
 		connections.SendResponseMessage(ctx, &resp)
 		return nil
 	case *GetResumeOffsetRequest:
-		fmt.Println("Processing GetResumeOffsetRequest:", req)
+		log.Println("SERVER: Processing GetResumeOffsetRequest:", req)
 		off, err := handleGetResumeOffset(&proxyServer.uploadSessions, &proxyServer.mutex, req)
 		if err != nil {
 			resp := BuildErrorResponse(req.Header.RequestUid, err)
@@ -80,17 +81,17 @@ func (proxyServer *GcsProxyServer) handleRequest(ctx context.Context, r interfac
 		connections.SendResponseMessage(ctx, &resp)
 		return nil
 	case *WriteAtRequest:
-		fmt.Println("Processing WriteAtRequest:", req)
+		log.Println("SERVER: Processing WriteAtRequest:", req)
 		err := handleWriteAt(proxyServer.ctx, connections, &proxyServer.uploadSessions, &proxyServer.mutex, req)
 		if err != nil {
-			fmt.Println("Error processing WriteAtRequest:", err)
+			log.Println("SERVER: Error processing WriteAtRequest:", err)
 			resp := BuildErrorResponse(req.Header.RequestUid, err)
 			connections.SendResponseMessage(ctx, resp)
 			return err
 		}
 		return nil
 	case *AbortRequest:
-		fmt.Println("Processing AbortRequest:", req)
+		log.Println("SERVER: Processing AbortRequest:", req)
 		err := handleAbort(&proxyServer.uploadSessions, &proxyServer.mutex, req)
 		if err != nil {
 			resp := BuildErrorResponse(req.Header.RequestUid, err)
@@ -120,7 +121,7 @@ func handleInitUploadSession(ctx context.Context, uploadSessions *map[string]*Up
 		return &utils.Error{
 			Code: utils.ErrCodeInitUploadSession,
 			Msg:  fmt.Sprintf("Failed to create a new session for %s/%s", header.Bucket, header.Object),
-			Tags: []string{utils.TagInternal},
+			Tags: []string{utils.TagNetwork},
 		}
 	}
 	(*uploadSessions)[sessionKey] = session
@@ -133,14 +134,14 @@ func createNewSession(ctx context.Context, uploadSessionsMutex *sync.Mutex, buck
 
 	gcsClient, err := utils.NewGcsClient(sessionCtx)
 	if err != nil {
-		fmt.Printf("Failed to create GCS client: %v\n", err)
+		log.Printf("SERVER: Failed to create GCS client: %v\n", err)
 		cancelFunc()
 		return nil, true
 	}
 
 	uploadUrl, err := gcsClient.NewUploadSession(sessionCtx, bucketName, objectName)
 	if err != nil {
-		fmt.Printf("Failed to create upload session: %v\n", err)
+		log.Printf("SERVER: Failed to create upload session: %v\n", err)
 		cancelFunc()
 		return nil, true
 	}
@@ -175,10 +176,10 @@ func onSessionFinishedGoroutine(ctx context.Context, uploadSessionsMutex *sync.M
 		}
 
 		session.isAborted = true
-		fmt.Printf("Session for %s/%s has timed out\n", bucketName, objectName)
+		log.Printf("SERVER: Session for %s/%s has timed out\n", bucketName, objectName)
 
 		if err := session.gcsClient.CancelUpload(context.Background(), session.uploadUrl); err != nil {
-			fmt.Printf("Error cancelling upload session: %v\n", err)
+			log.Printf("SERVER: Error cancelling upload session: %v\n", err)
 		}
 
 		_ = session.gcsClient.CancelUpload(ctx, session.uploadUrl)
@@ -213,7 +214,7 @@ func getSession(uploadSessions *map[string]*UploadSession, uploadSessionsMutex *
 	if !exists {
 		return nil, &utils.Error{
 			Code: utils.ErrCodeNotFound,
-			Msg:  fmt.Sprintf("Upload session for %s/%s not found", header.Bucket, header.Object),
+			Msg:  fmt.Sprintf("SERVER: Upload session for %s/%s not found", header.Bucket, header.Object),
 			Tags: []string{utils.TagNotFound},
 		}
 	}
@@ -224,7 +225,7 @@ func validateSessionState(session *UploadSession, header *WriteAtRequest) error 
 	if session.isAborted {
 		return &utils.Error{
 			Code: utils.ErrCodeAbortFailed,
-			Msg:  "Upload session is aborted",
+			Msg:  "SERVER: Upload session is aborted",
 			Tags: []string{utils.TagIllegalArgument},
 		}
 	}
@@ -232,7 +233,7 @@ func validateSessionState(session *UploadSession, header *WriteAtRequest) error 
 	if header.WriteAtHeader.ChunkBegin != session.resumeOffset {
 		return &utils.Error{
 			Code: utils.ErrCodeOutOfOrderWrite,
-			Msg:  fmt.Sprintf("Chunk begin %d does not match resume offset %d", header.WriteAtHeader.ChunkBegin, session.resumeOffset),
+			Msg:  fmt.Sprintf("SERVER: Chunk begin %d does not match resume offset %d", header.WriteAtHeader.ChunkBegin, session.resumeOffset),
 			Tags: []string{utils.TagOutOfOrder},
 		}
 	}
@@ -256,9 +257,9 @@ func handleNewChunk(ctx context.Context, connections *ClientConnectionPool, sess
 	if err != nil {
 		return &utils.Error{
 			Code:  utils.ErrCodeWriteAtFailed,
-			Msg:   "Failed to write to chunk reader",
+			Msg:   "SERVER: Failed to write to chunk reader",
 			Cause: err,
-			Tags:  []string{utils.TagInternal},
+			Tags:  []string{utils.TagLogOnly},
 		}
 	}
 
@@ -267,9 +268,9 @@ func handleNewChunk(ctx context.Context, connections *ClientConnectionPool, sess
 		if err != nil {
 			customErr := &utils.Error{
 				Code:  utils.ErrCodeUploadChunkFailed,
-				Msg:   "Failed to upload chunk",
+				Msg:   "SERVER: Failed to upload chunk",
 				Cause: err,
-				Tags:  []string{utils.TagInternal},
+				Tags:  []string{utils.TagNetwork, utils.TagRetryable},
 			}
 			resp := BuildErrorResponse(header.Header.RequestUid, customErr)
 			connections.SendResponseMessage(ctx, resp)
@@ -297,9 +298,9 @@ func handleExistingChunk(session *UploadSession, header *WriteAtRequest) error {
 	if err != nil {
 		return &utils.Error{
 			Code:  utils.ErrCodeWriteAtFailed,
-			Msg:   "Failed to write to existing chunk",
+			Msg:   "SERVER: Failed to write to chunk reader",
 			Cause: err,
-			Tags:  []string{utils.TagInternal},
+			Tags:  []string{utils.TagLogOnly},
 		}
 	}
 	return nil
@@ -308,12 +309,17 @@ func handleExistingChunk(session *UploadSession, header *WriteAtRequest) error {
 func loadChunkToGcdGoroutine(ctx context.Context, session *UploadSession, IsLast bool) error {
 	chunkSize := session.currentChunkEndOff - session.currentChunkBeginOff
 	if chunkSize <= 0 {
-		panic("invalid chunk size") // inner process forget to set value
+		panic("SERVER: invalid chunk size") // inner process forget to set value
 	}
 	err := session.gcsClient.UploadObjectPart(ctx, session.uploadUrl, session.currentChunkBeginOff, session.currentChunk, chunkSize, IsLast)
 	if err != nil {
-		err := fmt.Errorf("failed to upload object part: %w", err)
-		return err
+		customErr := &utils.Error{
+			Code:  utils.ErrCodeUploadChunkFailed,
+			Msg:   "SERVER: failed to upload object part",
+			Cause: err,
+			Tags:  []string{utils.TagNetwork, utils.TagRetryable},
+		}
+		return customErr
 	}
 
 	session.chunkLock.Lock()
@@ -330,8 +336,8 @@ func loadChunkToGcdGoroutine(ctx context.Context, session *UploadSession, IsLast
 		totalUploadTime := session.uploadEndTime.Sub(session.uploadStartTime)
 		averageSpeed := float64(session.totalBytesUploaded) / totalUploadTime.Seconds()
 
-		fmt.Printf("Upload completed for %s/%s\n", session.bucketName, session.objectName)
-		fmt.Printf("Total uploaded: %d bytes in %.2f seconds (Average speed: %.2f MB/s)\n",
+		log.Printf("SERVER: Upload completed for %s/%s\n", session.bucketName, session.objectName)
+		log.Printf("SERVER: Total uploaded: %d bytes in %.2f seconds (Average speed: %.2f MB/s)\n",
 			session.totalBytesUploaded, totalUploadTime.Seconds(), averageSpeed/(1024*1024))
 	}
 	return nil
@@ -339,11 +345,11 @@ func loadChunkToGcdGoroutine(ctx context.Context, session *UploadSession, IsLast
 
 func writeToChunkReader(size uint32, offsetInChunkReader uint32, reader io.Reader, currentChunkReader *utils.BuildableBuffer) error {
 	if size <= 0 {
-		return errors.New("invalid Data size")
+		return errors.New("SERVER: invalid Data size")
 	}
 	buf := make([]byte, size)
 	if err := binary.Read(reader, binary.BigEndian, &buf); err != nil {
-		return fmt.Errorf("failed to read WriteAtRequestHeader: %w", err)
+		return fmt.Errorf("SERVER: failed to read WriteAtRequestHeader: %w", err)
 	}
 	if err := currentChunkReader.WriteToOffset(offsetInChunkReader, buf); err != nil {
 		return err
@@ -359,12 +365,12 @@ func handleGetResumeOffset(uploadSessions *map[string]*UploadSession, uploadSess
 	uploadSessionsMutex.Unlock()
 
 	if !exists {
-		return -1, fmt.Errorf("upload session for %s/%s not found", header.Bucket, header.Object)
+		return -1, fmt.Errorf("SERVER: upload session for %s/%s not found", header.Bucket, header.Object)
 	}
 
 	gcsOffset, complete, err := session.gcsClient.GetResumeOffset(session.sessionCtx, session.uploadUrl)
 	if err != nil {
-		return -1, fmt.Errorf("failed to get resume offset from GCS: %w", err)
+		return -1, fmt.Errorf("SERVER: failed to get resume offset from GCS: %w", err)
 	}
 
 	if complete {
@@ -383,7 +389,7 @@ func handleAbort(uploadSessions *map[string]*UploadSession, uploadSessionsMutex 
 	uploadSessionsMutex.Unlock()
 
 	if !exists {
-		return fmt.Errorf("upload session for %s/%s not found", header.Bucket, header.Object)
+		return fmt.Errorf("SERVER: upload session for %s/%s not found", header.Bucket, header.Object)
 	}
 
 	session.isAborted = true
@@ -393,7 +399,7 @@ func handleAbort(uploadSessions *map[string]*UploadSession, uploadSessionsMutex 
 	defer cancel()
 
 	if err := session.gcsClient.CancelUpload(ctx, session.uploadUrl); err != nil {
-		fmt.Printf("Error cancelling upload session: %v\n", err)
+		log.Printf("SERVER: Error cancelling upload session: %v\n", err)
 	}
 
 	return nil
