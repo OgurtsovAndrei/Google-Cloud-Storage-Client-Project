@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"awesomeProject/netUtils"
 	"context"
 	"io"
 	"log"
@@ -81,7 +82,9 @@ func NewServerConnectionGroup(address string, ctx context.Context, handleRequest
 		clientsSessions: make(map[string]*ClientConnectionPool),
 	}
 
-	l, err := net.Listen("tcp", address)
+	netL, err := net.Listen("tcp", address)
+	l := netUtils.NewGcsSafeListener(netL)
+
 	if err != nil {
 		log.Printf("SERVER: NewServerConnectionGroup: Не удалось слушать адрес %s: %v", address, err)
 		return nil, err
