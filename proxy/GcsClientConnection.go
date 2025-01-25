@@ -148,12 +148,12 @@ func (cg *ClientConnectionGroup) sendHandshake(conn net.Conn) error {
 }
 
 func (cg *ClientConnectionGroup) writeToConnGoroutine(conn net.Conn, writeErrCh chan<- error) {
-	log.Println("f started")
+	log.Println("CLIENT: writeToConnGoroutine: Goroutine started")
 	defer log.Println("CLIENT: writeToConnGoroutine: Goroutine finished")
 	for {
 		select {
 		case req := <-cg.messages:
-			log.Printf("CLIENT: writeToConnGoroutine: Sending request for RequestUid=%d", req.Header.RequestUid)
+			log.Printf("CLIENT: writeToConnGoroutine: Sending request for RequestUid=%d of RequestType=%s", req.Header.RequestUid, getTypeReadableName(req.Header.RequestType))
 			if _, err := io.Copy(conn, NewRequestReader(req)); err != nil {
 				log.Printf("CLIENT: writeToConnGoroutine: Error writing request %s: %v", req.Header.ToReadableString(), err)
 
@@ -275,7 +275,7 @@ func (cg *ClientConnectionGroup) WaitResponse(ctx context.Context, requestUid ui
 			Tags: []string{utils.TagIllegalArgument},
 		}
 	}
-	log.Println("CLIENT: Waiting for response... for request - " + fmt.Sprint(requestUid) + " of type - " + fmt.Sprint(RequestType))
+	log.Println("CLIENT: Waiting for response... for request - " + fmt.Sprint(requestUid) + " of type - " + getTypeReadableName(RequestType))
 	select {
 	case <-ctx.Done():
 		return nil, utils.CastContextError(ctx.Err())

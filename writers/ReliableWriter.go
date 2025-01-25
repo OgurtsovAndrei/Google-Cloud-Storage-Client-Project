@@ -192,7 +192,7 @@ func (rw *ReliableWriterImpl) Abort(ctx context.Context) {
 func (rw *ReliableWriterImpl) launchWriting(ctx context.Context) {
 	go func() {
 		defer close(rw.resultChan)
-		defer fmt.Print("ReliableWriter: End launchWriting goroutine")
+		defer log.Println("ReliableWriter: End launchWriting goroutine")
 		for {
 			select {
 			case <-rw.writeEventsChan:
@@ -300,11 +300,13 @@ func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf *
 
 		currentOff, err := rw.unreliableWriter.GetResumeOffset(ctx)
 
+		var amount uint32
 		if err != nil {
-			return totalWritten, err
+			amount = 0
+		} else {
+			amount = uint32(currentOff - chunkBegin - totalWritten)
 		}
 
-		amount := uint32(currentOff - chunkBegin - totalWritten)
 		log.Printf("Dropping %d bytes\n", amount)
 		buf.DropFirst(amount)
 		totalWritten = currentOff - chunkBegin

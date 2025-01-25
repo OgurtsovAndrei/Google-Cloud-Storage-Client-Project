@@ -24,7 +24,7 @@ var (
 
 func main() {
 
-	rand.Seed(1)
+	//rand.Seed(1)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()

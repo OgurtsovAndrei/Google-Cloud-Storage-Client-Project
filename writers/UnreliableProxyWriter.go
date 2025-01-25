@@ -82,6 +82,14 @@ func (w *UnreliableProxyWriter) WriteAt(
 
 	var maxPartSize uint32 = 1 * 1024 * 1024
 	parts := reader.SplitByParts(maxPartSize)
+
+	if len(parts) == 0 {
+		if reader.size != 0 {
+			panic("No parts on reader size != 0")
+		}
+		return 0, nil
+	}
+
 	requestId := w.cg.NextUid()
 
 	var off int64 = chunkBegin
