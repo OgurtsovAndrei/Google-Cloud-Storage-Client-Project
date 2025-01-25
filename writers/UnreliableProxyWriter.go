@@ -4,9 +4,8 @@ import (
 	"awesomeProject/proxy"
 	"awesomeProject/utils"
 	"context"
-	"io"
 	"log"
-	"strings"
+	"strconv"
 )
 
 type UnreliableProxyWriter struct {
@@ -186,7 +185,7 @@ func (w *UnreliableProxyWriter) GetResumeOffset(ctx context.Context) (int64, *ut
 		return 0, convErr
 	}
 
-	off, parseErr := parseOffset(strings.NewReader(resp.Data))
+	off, parseErr := parseOffset(resp.Data)
 	if parseErr != nil {
 		return 0, parseErr
 	}
@@ -214,19 +213,15 @@ func (w *UnreliableProxyWriter) Abort(ctx context.Context) {
 	_, _ = w.cg.WaitResponse(ctx, req.Header.RequestUid, req.Header.RequestType)
 }
 
-func parseOffset(data io.Reader) (int64, *utils.Error) {
-	var offset int64
-	buf := make([]byte, 8)
-	if _, err := data.Read(buf); err != nil {
+func parseOffset(data string) (int64, *utils.Error) {
+	offset, err := strconv.ParseInt(data, 10, 64)
+	if err != nil {
 		return 0, &utils.Error{
 			Code:  utils.ErrCodeParseOffset,
-			Msg:   "Failed to read offset from response data",
+			Msg:   "Failed to parse offset from response data",
 			Cause: err,
 			Tags:  []string{utils.TagIllegalArgument},
 		}
-	}
-	for _, b := range buf {
-		offset = offset*10 + int64(b-'0')
 	}
 	return offset, nil
 }
