@@ -192,7 +192,7 @@ func (rw *ReliableWriterImpl) Abort(ctx context.Context) {
 func (rw *ReliableWriterImpl) launchWriting(ctx context.Context) {
 	go func() {
 		defer close(rw.resultChan)
-		defer fmt.Print("End launch goroutine")
+		defer fmt.Print("ReliableWriter: End launchWriting goroutine")
 		for {
 			select {
 			case <-rw.writeEventsChan:
@@ -267,6 +267,7 @@ func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf *
 	for attempt := 0; attempt < 5; attempt++ {
 		reader := buf.GetReader()
 
+		log.Printf("Attempting to write from offset %d to %d\n", chunkBegin+totalWritten, chunkEnd)
 		written, err := rw.unreliableWriter.WriteAt(ctx, chunkBegin+totalWritten, chunkEnd, reader, isLast)
 
 		if err == nil {
