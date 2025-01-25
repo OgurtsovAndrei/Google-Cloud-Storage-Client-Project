@@ -180,7 +180,6 @@ func (scg *ServerConnectionGroup) RegisterConnection(req *HandshakeRequest, conn
 		log.Printf("SERVER: RegisterConnection: Existing ClientConnectionPool found for ClientID=%s", req.ClientID)
 	}
 
-	go clientConnPool.writeToConnGoroutine(conn, scg, req.ClientID)
 	clientConnPool.lock.Lock()
 	defer clientConnPool.lock.Unlock()
 	clientConnPool.conns[conn] = true
@@ -189,6 +188,8 @@ func (scg *ServerConnectionGroup) RegisterConnection(req *HandshakeRequest, conn
 
 	SendSuccessResponse(conn, req.Header.RequestUid, "OK")
 	log.Printf("SERVER: RegisterConnection: Success response sent to ClientID=%s", req.ClientID)
+
+	go clientConnPool.writeToConnGoroutine(conn, scg, req.ClientID)
 	return clientConnPool
 }
 
