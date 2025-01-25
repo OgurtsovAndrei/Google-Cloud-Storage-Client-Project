@@ -244,8 +244,9 @@ func (rw *ReliableWriterImpl) handleWriteEvents(ctx context.Context) (isFinished
 
 		chunkBegin := int64(rw.offset)
 		chunkEnd := chunkBegin + int64(buf.size)
+		var written int64
 
-		written, err := rw.attemptWriteWithRetries(ctx, buf.GetReader(), chunkBegin, chunkEnd, isLast)
+		written, err = rw.attemptWriteWithRetries(ctx, buf.GetReader(), chunkBegin, chunkEnd, isLast)
 		if err != nil {
 			log.Println("Failed to write after retries:", err)
 			rw.Abort(ctx)
