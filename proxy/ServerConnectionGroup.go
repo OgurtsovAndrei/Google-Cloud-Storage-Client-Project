@@ -33,7 +33,7 @@ func NewClientConnectionPool(clientID string, parentCtx context.Context) *Client
 }
 
 func (clientPool *ClientConnectionPool) SendResponseMessage(ctx context.Context, msg *ResponseMessage) {
-	log.Printf("SERVER: SendResponseMessage: Sending message with RequestUid=%d", msg.Header.RequestUid)
+	log.Printf("SERVER: SendResponseMessage: Sending message with RequestUid=%d, Body=%s", msg.Header.RequestUid, msg.Data)
 	select {
 	case clientPool.messages <- msg:
 		log.Printf("SERVER: SendResponseMessage: Sent response message with RequestUid=%d", msg.Header.RequestUid)
@@ -205,14 +205,19 @@ func (scg *ServerConnectionGroup) UnRegisterConnection(clientID string, conn net
 	}
 
 	clientConnPool.lock.Lock()
+	if _, exists := clientConnPool.conns[conn]; !exists {
+		log.Printf("SERVER: UnRegisterConnection: Connection not found in pool for ClientID=%s", clientID)
+		clientConnPool.lock.Unlock()
+		return
+	}
 	delete(clientConnPool.conns, conn)
 	clientConnPool.nConnections--
 	log.Printf("SERVER: UnRegisterConnection: Removed connection for ClientID=%s. Remaining connections=%d", clientID, clientConnPool.nConnections)
 	clientConnPool.lock.Unlock()
 
 	if clientConnPool.nConnections == 0 {
-		log.Printf("SERVER: UnRegisterConnection: No active connections left for ClientID=%s. Cleaning up connection pool.", clientID)
-		scg.cleanupConnPool(clientConnPool)
+		log.Printf("SERVER: UnRegisterConnection: No active connections left for ClientID=%s. Cleaning up connection pool?", clientID)
+		//scg.cleanupConnPool(clientConnPool)
 	}
 }
 
