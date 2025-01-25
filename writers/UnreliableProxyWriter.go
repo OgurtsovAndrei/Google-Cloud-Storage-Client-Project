@@ -4,9 +4,8 @@ import (
 	"awesomeProject/proxy"
 	"awesomeProject/utils"
 	"context"
-	"io"
 	"log"
-	"strings"
+	"strconv"
 )
 
 type UnreliableProxyWriter struct {
@@ -38,6 +37,7 @@ func NewUnreliableProxyWriter(ctx context.Context, cg *proxy.ClientConnectionGro
 	msg := req.ToRequestMessage()
 	log.Printf("Sending init connection message...")
 
+	cg.CreateRespondChannel(req.Header.RequestUid)
 	if err := cg.SendMessage(ctx, &msg); err != nil {
 		return nil, &utils.Error{
 			Code:  utils.ErrCodeSendMessage,
@@ -47,7 +47,7 @@ func NewUnreliableProxyWriter(ctx context.Context, cg *proxy.ClientConnectionGro
 		}
 	}
 
-	resp, err := w.cg.WaitResponse(ctx, req.Header.RequestUid)
+	resp, err := w.cg.WaitResponse(ctx, req.Header.RequestUid, req.Header.RequestType)
 	if err != nil {
 		return nil, &utils.Error{
 			Code:  utils.ErrCodeWaitResponse,
@@ -82,39 +82,59 @@ func (w *UnreliableProxyWriter) WriteAt(
 
 	var maxPartSize uint32 = 1 * 1024 * 1024
 	parts := reader.SplitByParts(maxPartSize)
+
+	if len(parts) == 0 {
+		if reader.size != 0 {
+			panic("No parts on reader size != 0")
+		}
+		return 0, nil
+	}
+
 	requestId := w.cg.NextUid()
 
 	var off int64 = chunkBegin
-	for _, part := range parts {
-		req := &proxy.WriteAtRequest{
-			Header: proxy.RequestHeader{
-				RequestUid:  requestId,
-				RequestType: proxy.MessageTypeUploadPart,
-			},
-			WriteAtHeader: proxy.WriteAtHeader{
-				BucketNameLength: uint32(len(w.bucket)),
-				ObjectNameLength: uint32(len(w.object)),
-				ChunkBegin:       chunkBegin,
-				ChunkEnd:         chunkEnd,
-				Off:              off,
-				Size:             int64(part.size),
-				IsLast:           boolToByte(isLast),
-			},
-			Bucket: w.bucket,
-			Object: w.object,
-			Data:   part,
+	partCtx, cancel := context.WithCancel(ctx)
+	defer func() {
+		log.Printf("CLIENT: WriteAt: Context cancelled for request with ID %d", requestId)
+		cancel()
+	}()
+
+	w.cg.CreateRespondChannel(requestId)
+
+	go func() {
+		log.Printf("CLIENT: WriteAt: Sending %d parts for request with ID %d", len(parts), requestId)
+		for _, part := range parts {
+			req := &proxy.WriteAtRequest{
+				Header: proxy.RequestHeader{
+					RequestUid:  requestId,
+					RequestType: proxy.MessageTypeUploadPart,
+				},
+				WriteAtHeader: proxy.WriteAtHeader{
+					BucketNameLength: uint32(len(w.bucket)),
+					ObjectNameLength: uint32(len(w.object)),
+					ChunkBegin:       chunkBegin,
+					ChunkEnd:         chunkEnd,
+					Off:              off,
+					Size:             int64(part.size),
+					IsLast:           boolToByte(isLast),
+				},
+				Bucket: w.bucket,
+				Object: w.object,
+				Data:   part,
+			}
+
+			off += int64(part.size)
+			message := req.ToRequestMessage()
+
+			err := w.cg.SendMessage(partCtx, &message)
+			if err != nil {
+				ResMessage := proxy.BuildErrorResponse(req.Header.RequestUid, err)
+				w.cg.DispatchResponse(ResMessage)
+			}
 		}
+	}()
 
-		off += int64(part.size)
-		message := req.ToRequestMessage()
-
-		err := w.cg.SendMessage(ctx, &message)
-		if err != nil {
-			return 0, err
-		}
-	}
-
-	resp, err := w.cg.WaitResponse(ctx, requestId)
+	resp, err := w.cg.WaitResponse(ctx, requestId, proxy.MessageTypeUploadPart)
 	if err != nil {
 		return 0, err
 	}
@@ -145,6 +165,7 @@ func (w *UnreliableProxyWriter) GetResumeOffset(ctx context.Context) (int64, *ut
 	}
 
 	message := req.ToRequestMessage()
+	w.cg.CreateRespondChannel(req.Header.RequestUid)
 	if err := w.cg.SendMessage(ctx, &message); err != nil {
 		return 0, &utils.Error{
 			Code:  utils.ErrCodeSendMessage,
@@ -154,7 +175,7 @@ func (w *UnreliableProxyWriter) GetResumeOffset(ctx context.Context) (int64, *ut
 		}
 	}
 
-	resp, err := w.cg.WaitResponse(ctx, req.Header.RequestUid)
+	resp, err := w.cg.WaitResponse(ctx, req.Header.RequestUid, req.Header.RequestType)
 	if err != nil {
 		return 0, &utils.Error{
 			Code:  utils.ErrCodeWaitResponse,
@@ -172,7 +193,7 @@ func (w *UnreliableProxyWriter) GetResumeOffset(ctx context.Context) (int64, *ut
 		return 0, convErr
 	}
 
-	off, parseErr := parseOffset(strings.NewReader(resp.Data))
+	off, parseErr := parseOffset(resp.Data)
 	if parseErr != nil {
 		return 0, parseErr
 	}
@@ -195,23 +216,20 @@ func (w *UnreliableProxyWriter) Abort(ctx context.Context) {
 	}
 
 	message := req.ToRequestMessage()
+	w.cg.CreateRespondChannel(req.Header.RequestUid)
 	_ = w.cg.SendMessage(ctx, &message)
-	_, _ = w.cg.WaitResponse(ctx, req.Header.RequestUid)
+	_, _ = w.cg.WaitResponse(ctx, req.Header.RequestUid, req.Header.RequestType)
 }
 
-func parseOffset(data io.Reader) (int64, *utils.Error) {
-	var offset int64
-	buf := make([]byte, 8)
-	if _, err := data.Read(buf); err != nil {
+func parseOffset(data string) (int64, *utils.Error) {
+	offset, err := strconv.ParseInt(data, 10, 64)
+	if err != nil {
 		return 0, &utils.Error{
 			Code:  utils.ErrCodeParseOffset,
-			Msg:   "Failed to read offset from response data",
+			Msg:   "Failed to parse offset from response data",
 			Cause: err,
 			Tags:  []string{utils.TagIllegalArgument},
 		}
-	}
-	for _, b := range buf {
-		offset = offset*10 + int64(b-'0')
 	}
 	return offset, nil
 }

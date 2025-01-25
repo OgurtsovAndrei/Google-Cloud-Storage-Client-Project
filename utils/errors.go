@@ -18,6 +18,9 @@ const (
 	TagTimeout         = "timeout"          // Operation timed out.
 	TagNotFound        = "not-found"        // Resource not found.
 	TagInternal        = "internal-error"   // Internal server or system error, same as Panic
+	TagLogOnly         = "log-only"         // Error should only be logged, no further action.
+	TagEOF             = "eof"              // End of stream reached.
+	TagIOError         = "io-error"         // IO-related error.
 )
 
 // Writers Module (UnreliableProxyWriter) Error Codes
@@ -34,6 +37,9 @@ const (
 const (
 	ErrCodeResponseChannelNotFound = "CONN001" // Response channel not found.
 	ErrCodeHandleConnectionFailed  = "CONN002" // Connection failed to establish or maintain.
+	DataReadFailedError            = "CONN003" // Failed to read data from connection.
+	EndOfStreamError               = "CONN004" // End of stream encountered.
+	HeaderReadFailedError          = "CONN005" // Failed to read header from connection.
 )
 
 const (

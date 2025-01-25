@@ -1,6 +1,8 @@
 package main
 
 import (
+	"awesomeProject/proxy"
+	"awesomeProject/utils"
 	"awesomeProject/writers"
 	"context"
 	"fmt"
@@ -22,19 +24,34 @@ var (
 
 func main() {
 
+	//rand.Seed(1)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	//go func() {
-	//	_ = proxy.NewGcsProxyServer(ctx, listenAddress)
-	//}()
+	suffix := make([]byte, 8)
+	for i := range suffix {
+		suffix[i] = byte(rand.Intn(26) + 97) // Generate random lowercase letters
+	}
+	fileName = fmt.Sprintf("%s_%s", fileName, string(suffix))
 
-	//time.Sleep(1 * time.Second)
+	defer func(ctx context.Context, bucketName, fileName string) {
+		err := utils.DeleteFileFromBucket(ctx, bucketName, fileName)
+		if err != nil {
+			println("Error deleting file from bucket:", err)
+		}
+	}(ctx, bucket, fileName)
+
+	go func() {
+		_ = proxy.NewGcsProxyServer(ctx, listenAddress)
+	}()
+
+	time.Sleep(1 * time.Second)
 
 	unreliableWriterBuilder := func() (writers.UnreliableWriter, error) { //unreliableWriter, err := writers.NewUnreliableLocalWriter(fileName)
-		unreliableWriter, err := writers.NewUnreliableGCSWriter(ctx, bucket, fileName)
-		//cg := proxy.NewClientConnectionGroup(10, "localhost"+listenAddress, ctx, 4)
-		//unreliableWriter, err := writers.NewUnreliableProxyWriter(ctx, cg, bucket, fileName)
+		//unreliableWriter, err := writers.NewUnreliableGCSWriter(ctx, bucket, fileName)
+		cg := proxy.NewClientConnectionGroup(10, "localhost"+listenAddress, ctx, 1)
+		unreliableWriter, err := writers.NewUnreliableProxyWriter(ctx, cg, bucket, fileName)
 		if err != nil {
 			log.Println("Failed to create UnreliableWriter:", err)
 			return nil, err

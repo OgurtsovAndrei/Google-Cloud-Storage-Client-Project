@@ -19,15 +19,41 @@ const (
 	MessageTypeHandshake       = 4
 )
 
+func getTypeReadableName(messageType uint32) string {
+	switch messageType {
+	case MessageTypeInitConnection:
+		return "Init Connection"
+	case MessageTypeUploadPart:
+		return "Upload Part"
+	case MessageTypeGetResumeOffset:
+		return "Get Resume Offset"
+	case MessageTypeAbort:
+		return "Abort"
+	case MessageTypeHandshake:
+		return "Handshake"
+	default:
+		return fmt.Sprintf("Unknown Message Type (%d)", messageType)
+	}
+}
+
 type RequestHeader struct {
 	RequestUid  uint32
 	RequestType uint32
+}
+
+func (hdr RequestHeader) ToReadableString() string {
+	return fmt.Sprintf("{RequestUid: %d, RequestType: %s}", hdr.RequestUid, getTypeReadableName(hdr.RequestType))
 }
 
 type ResponseHeader struct {
 	RequestUid uint32
 	StatusCode int32
 	DataLength uint32
+}
+
+func (hdr ResponseHeader) ToReadableString() string {
+	return fmt.Sprintf("{RequestUid: %d, StatusCode: %d, DataLength: %d}",
+		hdr.RequestUid, hdr.StatusCode, hdr.DataLength)
 }
 
 type RequestMessage struct {
@@ -39,6 +65,10 @@ type RequestMessage struct {
 type ResponseMessage struct {
 	Header ResponseHeader
 	Data   string
+}
+
+func (resp *ResponseMessage) ToReadableString() string {
+	return fmt.Sprintf("{Header: %s, Data: %s}", resp.Header.ToReadableString(), resp.Data)
 }
 
 type HandshakeHeader struct {
@@ -349,7 +379,7 @@ func ReadRequest(reader io.Reader) (interface{}, error) {
 		log.Printf("ReadRequest: Failed to read request header: %v  %v\n", err, header)
 		return nil, err
 	}
-	log.Printf("Read 8 bytes of request header: %x\n", header)
+	log.Printf("Read 8 bytes of request header: %s\n", header.ToReadableString())
 
 	switch header.RequestType {
 	case MessageTypeInitConnection:
@@ -437,7 +467,6 @@ func NewResponseReader(resp *ResponseMessage) io.Reader {
 }
 
 func (r *responseReader) Read(p []byte) (n int, err error) {
-	log.Println("Response Message: Starting Read")
 	for {
 		if r.currentReader == nil {
 			return n, io.EOF
@@ -562,7 +591,7 @@ func buildBasicErrorResponse(requestUid uint32, err error) *ResponseMessage {
 	}
 }
 
-func ReadResponse(reader io.Reader) (*ResponseMessage, error) {
+func ReadResponse(reader io.Reader) (*ResponseMessage, *utils.Error) {
 	log.Println("ReadResponse: Starting to read response header")
 
 	// Read the response header
@@ -570,9 +599,19 @@ func ReadResponse(reader io.Reader) (*ResponseMessage, error) {
 	err := binary.Read(reader, binary.BigEndian, &header)
 	if err != nil {
 		if err == io.EOF {
-			return nil, io.EOF // End of stream
+			return nil, &utils.Error{
+				Code:  utils.EndOfStreamError,
+				Msg:   "end of stream",
+				Cause: err,
+				Tags:  []string{utils.TagEOF, utils.TagNetwork},
+			}
 		}
-		return nil, fmt.Errorf("failed to read response header: %w", err)
+		return nil, &utils.Error{
+			Code:  utils.HeaderReadFailedError,
+			Msg:   "failed to read response header",
+			Cause: err,
+			Tags:  []string{utils.TagNetwork, utils.TagIOError, utils.TagConnectionDown},
+		}
 	}
 	log.Printf("ReadResponse: Successfully read response header: %+v", header)
 
@@ -580,7 +619,12 @@ func ReadResponse(reader io.Reader) (*ResponseMessage, error) {
 	data := make([]byte, header.DataLength)
 	_, err = io.ReadFull(reader, data)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response data: %w", err)
+		return nil, &utils.Error{
+			Code:  utils.DataReadFailedError,
+			Msg:   "failed to read response data",
+			Cause: err,
+			Tags:  []string{utils.TagIOError, utils.TagNetwork},
+		}
 	}
 	log.Printf("ReadResponse: Successfully read response data \\ header = %+v", header)
 

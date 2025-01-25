@@ -192,7 +192,7 @@ func (rw *ReliableWriterImpl) Abort(ctx context.Context) {
 func (rw *ReliableWriterImpl) launchWriting(ctx context.Context) {
 	go func() {
 		defer close(rw.resultChan)
-		defer fmt.Print("End launch goroutine")
+		defer log.Println("ReliableWriter: End launchWriting goroutine")
 		for {
 			select {
 			case <-rw.writeEventsChan:
@@ -244,8 +244,9 @@ func (rw *ReliableWriterImpl) handleWriteEvents(ctx context.Context) (isFinished
 
 		chunkBegin := int64(rw.offset)
 		chunkEnd := chunkBegin + int64(buf.size)
+		var written int64
 
-		written, err := rw.attemptWriteWithRetries(ctx, buf.GetReader(), chunkBegin, chunkEnd, isLast)
+		written, err = rw.attemptWriteWithRetries(ctx, buf.GetReader(), chunkBegin, chunkEnd, isLast)
 		if err != nil {
 			log.Println("Failed to write after retries:", err)
 			rw.Abort(ctx)
@@ -264,9 +265,14 @@ func (rw *ReliableWriterImpl) handleWriteEvents(ctx context.Context) (isFinished
 func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf *ScatterGatherBuffer, chunkBegin, chunkEnd int64, isLast bool) (int64, error) {
 	var totalWritten int64 = 0
 
-	for attempt := 0; attempt < 5; attempt++ {
+	for attempt := 0; attempt < 10; attempt++ {
+		if totalWritten == chunkEnd-chunkBegin {
+			return totalWritten, nil
+		}
+
 		reader := buf.GetReader()
 
+		log.Printf("Attempting to write from offset %d to %d\n", chunkBegin+totalWritten, chunkEnd)
 		written, err := rw.unreliableWriter.WriteAt(ctx, chunkBegin+totalWritten, chunkEnd, reader, isLast)
 
 		if err == nil {
@@ -276,16 +282,17 @@ func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf *
 
 		log.Printf("Error writing to unreliable writer (attempt %d): %v\n", attempt+1, err)
 
-		if err.HasTag(utils.TagNetwork) {
-			fmt.Println("Rebuilding writer due to network error")
-			if strings.Contains(err.Cause.Error(), "503") {
-				writer, err := rw.unreliableWriterBuilder()
-				if err != nil {
-					return totalWritten, err
-				}
-				rw.unreliableWriter = writer
-			}
-		}
+		// todo: replace by RepairConn call
+		//if err.HasTag(utils.TagNetwork) {
+		//	log.Println("Rebuilding writer due to network error")
+		//	if strings.Contains(err.Cause.Error(), "503") {
+		//		writer, err := rw.unreliableWriterBuilder()
+		//		if err != nil {
+		//			return totalWritten, err
+		//		}
+		//		rw.unreliableWriter = writer
+		//	}
+		//}
 
 		if !err.HasTag(utils.TagRetryable) {
 			return totalWritten, err
@@ -293,11 +300,13 @@ func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf *
 
 		currentOff, err := rw.unreliableWriter.GetResumeOffset(ctx)
 
+		var amount uint32
 		if err != nil {
-			return totalWritten, err
+			amount = 0
+		} else {
+			amount = uint32(currentOff - chunkBegin - totalWritten)
 		}
 
-		amount := uint32(currentOff - chunkBegin - totalWritten)
 		log.Printf("Dropping %d bytes\n", amount)
 		buf.DropFirst(amount)
 		totalWritten = currentOff - chunkBegin
@@ -307,5 +316,5 @@ func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf *
 		}
 	}
 
-	return totalWritten, errors.New("failed to write after 3 attempts")
+	return totalWritten, errors.New("failed to write after 10 attempts")
 }

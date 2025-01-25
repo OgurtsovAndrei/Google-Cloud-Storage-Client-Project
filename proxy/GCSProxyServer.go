@@ -32,6 +32,8 @@ type UploadSession struct {
 	currentChunkBeginOff int64
 	currentChunkEndOff   int64
 	currentChunk         *utils.BuildableBuffer
+
+	currentUploadChunkRequestId uint32
 }
 
 type GcsProxyServer struct {
@@ -176,7 +178,7 @@ func onSessionFinishedGoroutine(ctx context.Context, uploadSessionsMutex *sync.M
 		}
 
 		session.isAborted = true
-		log.Printf("SERVER: Session for %s/%s has timed out\n", bucketName, objectName)
+		log.Printf("SERVER: Session for %s/%s was cancelled\n", bucketName, objectName)
 
 		if err := session.gcsClient.CancelUpload(context.Background(), session.uploadUrl); err != nil {
 			log.Printf("SERVER: Error cancelling upload session: %v\n", err)
@@ -221,7 +223,7 @@ func getSession(uploadSessions *map[string]*UploadSession, uploadSessionsMutex *
 	return session, nil
 }
 
-func validateSessionState(session *UploadSession, header *WriteAtRequest) error {
+func validateSessionState(session *UploadSession, writeAtRequest *WriteAtRequest) error {
 	if session.isAborted {
 		return &utils.Error{
 			Code: utils.ErrCodeAbortFailed,
@@ -230,13 +232,18 @@ func validateSessionState(session *UploadSession, header *WriteAtRequest) error 
 		}
 	}
 
-	if header.WriteAtHeader.ChunkBegin != session.resumeOffset {
+	if writeAtRequest.WriteAtHeader.ChunkBegin != session.resumeOffset {
 		return &utils.Error{
 			Code: utils.ErrCodeOutOfOrderWrite,
-			Msg:  fmt.Sprintf("SERVER: Chunk begin %d does not match resume offset %d", header.WriteAtHeader.ChunkBegin, session.resumeOffset),
+			Msg:  fmt.Sprintf("SERVER: Chunk begin %d does not match resume offset %d", writeAtRequest.WriteAtHeader.ChunkBegin, session.resumeOffset),
 			Tags: []string{utils.TagOutOfOrder},
 		}
 	}
+	session.chunkLock.Lock()
+	if session.currentUploadChunkRequestId < writeAtRequest.Header.RequestUid {
+		session.currentUploadChunkRequestId = writeAtRequest.Header.RequestUid
+	}
+	session.chunkLock.Unlock()
 	return nil
 }
 
@@ -255,28 +262,31 @@ func handleNewChunk(ctx context.Context, connections *ClientConnectionPool, sess
 		session.currentChunk,
 	)
 	if err != nil {
-		return &utils.Error{
-			Code:  utils.ErrCodeWriteAtFailed,
-			Msg:   "SERVER: Failed to write to chunk reader",
-			Cause: err,
-			Tags:  []string{utils.TagLogOnly},
-		}
+		return err
 	}
 
 	go func() {
+		log.Printf("SERVER: <loadChunkToGSCGoroutine> Begin uploading chunk for %s/%s, RequestUid=%d", session.bucketName, session.objectName, session.currentUploadChunkRequestId)
 		err := loadChunkToGcdGoroutine(ctx, session, header.WriteAtHeader.IsLast != 0)
+		session.chunkLock.Lock()
 		if err != nil {
+			log.Printf("SERVER: <loadChunkToGSCGoroutine> Failed to upload chunk to GCS for %s/%s, RequestUid=%d. Error: %v\n", session.bucketName, session.objectName, session.currentUploadChunkRequestId, err)
 			customErr := &utils.Error{
 				Code:  utils.ErrCodeUploadChunkFailed,
 				Msg:   "SERVER: Failed to upload chunk",
 				Cause: err,
 				Tags:  []string{utils.TagNetwork, utils.TagRetryable},
 			}
-			resp := BuildErrorResponse(header.Header.RequestUid, customErr)
+			resp := BuildErrorResponse(session.currentUploadChunkRequestId, customErr)
+
+			session.chunkLock.Unlock()
 			connections.SendResponseMessage(ctx, resp)
 			return
 		}
-		resp := BuildSucceedResponse(header.Header.RequestUid, fmt.Sprintf("OK"))
+		log.Printf("SERVER: <loadChunkToGSCGoroutine> Successfully uploaded chunk for %s/%s, RequestUid=%d", session.bucketName, session.objectName, session.currentUploadChunkRequestId)
+		resp := BuildSucceedResponse(session.currentUploadChunkRequestId, fmt.Sprintf("OK"))
+
+		session.chunkLock.Unlock()
 		connections.SendResponseMessage(ctx, &resp)
 	}()
 
@@ -296,12 +306,7 @@ func handleExistingChunk(session *UploadSession, header *WriteAtRequest) error {
 		currentChunkReader,
 	)
 	if err != nil {
-		return &utils.Error{
-			Code:  utils.ErrCodeWriteAtFailed,
-			Msg:   "SERVER: Failed to write to chunk reader",
-			Cause: err,
-			Tags:  []string{utils.TagLogOnly},
-		}
+		return err
 	}
 	return nil
 }
@@ -352,7 +357,12 @@ func writeToChunkReader(size uint32, offsetInChunkReader uint32, reader io.Reade
 		return fmt.Errorf("SERVER: failed to read WriteAtRequestHeader: %w", err)
 	}
 	if err := currentChunkReader.WriteToOffset(offsetInChunkReader, buf); err != nil {
-		return err
+		return &utils.Error{
+			Code:  utils.ErrCodeWriteAtFailed,
+			Msg:   "SERVER: Failed to write to chunk reader, as part is already exists",
+			Cause: err,
+			Tags:  []string{utils.TagLogOnly},
+		}
 	}
 	return nil
 }

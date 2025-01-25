@@ -55,14 +55,15 @@ func (e *GcsUnstableConn) checkThreshold(n int64) {
 // Interface Impl
 
 func (e *GcsUnstableConn) Read(b []byte) (int, error) {
-	select {
-	case <-e.ctx.Done():
+	e.closeMx.Lock()
+	if e.closed {
+		e.closeMx.Unlock()
 		return 0, errors.New("connection closed due to injected error")
-	default:
-		n, err := e.conn.Read(b)
-		e.checkThreshold(int64(n))
-		return n, err
 	}
+	e.closeMx.Unlock()
+	n, err := e.conn.Read(b)
+	e.checkThreshold(int64(n))
+	return n, err
 }
 
 func (e *GcsUnstableConn) Write(b []byte) (int, error) {

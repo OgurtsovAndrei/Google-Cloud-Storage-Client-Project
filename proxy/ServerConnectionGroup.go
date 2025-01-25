@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"awesomeProject/netUtils"
 	"context"
 	"io"
 	"log"
@@ -33,7 +34,7 @@ func NewClientConnectionPool(clientID string, parentCtx context.Context) *Client
 }
 
 func (clientPool *ClientConnectionPool) SendResponseMessage(ctx context.Context, msg *ResponseMessage) {
-	log.Printf("SERVER: SendResponseMessage: Sending message with RequestUid=%d", msg.Header.RequestUid)
+	log.Printf("SERVER: SendResponseMessage: Sending message with RequestUid=%d, Body=%s", msg.Header.RequestUid, msg.Data)
 	select {
 	case clientPool.messages <- msg:
 		log.Printf("SERVER: SendResponseMessage: Sent response message with RequestUid=%d", msg.Header.RequestUid)
@@ -49,6 +50,7 @@ func (clientPool *ClientConnectionPool) writeToConnGoroutine(conn net.Conn, sgc 
 		case req := <-clientPool.messages:
 			log.Printf("SERVER: writeToConnGoroutine: Sending response for RequestUid=%d, Body=%s", req.Header.RequestUid, req.Data)
 			if _, err := io.Copy(conn, NewResponseReader(req)); err != nil {
+				clientPool.messages <- req
 				log.Printf("SERVER: writeToConnGoroutine: Error writing request: %v", err)
 				sgc.UnRegisterConnection(clientUid, conn)
 				return
@@ -80,7 +82,9 @@ func NewServerConnectionGroup(address string, ctx context.Context, handleRequest
 		clientsSessions: make(map[string]*ClientConnectionPool),
 	}
 
-	l, err := net.Listen("tcp", address)
+	netL, err := net.Listen("tcp", address)
+	l := netUtils.NewGcsSafeListener(netL)
+
 	if err != nil {
 		log.Printf("SERVER: NewServerConnectionGroup: Не удалось слушать адрес %s: %v", address, err)
 		return nil, err
@@ -123,8 +127,10 @@ func NewServerConnectionGroup(address string, ctx context.Context, handleRequest
 				}
 
 				var clientConnectionPool *ClientConnectionPool
+				var request *HandshakeRequest
 				switch req := r.(type) {
 				case *HandshakeRequest:
+					request = req
 					clientConnectionPool = scg.RegisterConnection(req, conn)
 				default:
 					log.Printf("SERVER: NewServerConnectionGroup: Error ReadRequest: %v", err)
@@ -132,7 +138,7 @@ func NewServerConnectionGroup(address string, ctx context.Context, handleRequest
 				}
 
 				scg.wg.Add(1)
-				go goHandleServerConnection(conn, scg, clientConnectionPool)
+				go goHandleServerConnection(conn, scg, clientConnectionPool, request)
 			}
 		}
 	}()
@@ -140,10 +146,10 @@ func NewServerConnectionGroup(address string, ctx context.Context, handleRequest
 	return scg, nil
 }
 
-func goHandleServerConnection(c net.Conn, scg *ServerConnectionGroup, connPool *ClientConnectionPool) {
+func goHandleServerConnection(c net.Conn, scg *ServerConnectionGroup, connPool *ClientConnectionPool, req *HandshakeRequest) {
 	defer scg.wg.Done()
 	defer c.Close()
-	scg.handleConnection(c, connPool)
+	scg.handleConnection(c, connPool, req)
 }
 
 func (scg *ServerConnectionGroup) cleanupConnPool(clientConn *ClientConnectionPool) {
@@ -179,15 +185,16 @@ func (scg *ServerConnectionGroup) RegisterConnection(req *HandshakeRequest, conn
 		log.Printf("SERVER: RegisterConnection: Existing ClientConnectionPool found for ClientID=%s", req.ClientID)
 	}
 
-	go clientConnPool.writeToConnGoroutine(conn, scg, req.ClientID)
 	clientConnPool.lock.Lock()
-	defer clientConnPool.lock.Unlock()
 	clientConnPool.conns[conn] = true
 	clientConnPool.nConnections++
 	log.Printf("SERVER: RegisterConnection: Client %s registered a new connection. Total connections=%d", req.ClientID, clientConnPool.nConnections)
+	clientConnPool.lock.Unlock()
 
 	SendSuccessResponse(conn, req.Header.RequestUid, "OK")
 	log.Printf("SERVER: RegisterConnection: Success response sent to ClientID=%s", req.ClientID)
+
+	go clientConnPool.writeToConnGoroutine(conn, scg, req.ClientID)
 	return clientConnPool
 }
 
@@ -203,18 +210,23 @@ func (scg *ServerConnectionGroup) UnRegisterConnection(clientID string, conn net
 	}
 
 	clientConnPool.lock.Lock()
+	if _, exists := clientConnPool.conns[conn]; !exists {
+		log.Printf("SERVER: UnRegisterConnection: Connection not found in pool for ClientID=%s", clientID)
+		clientConnPool.lock.Unlock()
+		return
+	}
 	delete(clientConnPool.conns, conn)
 	clientConnPool.nConnections--
 	log.Printf("SERVER: UnRegisterConnection: Removed connection for ClientID=%s. Remaining connections=%d", clientID, clientConnPool.nConnections)
 	clientConnPool.lock.Unlock()
 
 	if clientConnPool.nConnections == 0 {
-		log.Printf("SERVER: UnRegisterConnection: No active connections left for ClientID=%s. Cleaning up connection pool.", clientID)
-		scg.cleanupConnPool(clientConnPool)
+		log.Printf("SERVER: UnRegisterConnection: No active connections left for ClientID=%s. Cleaning up connection pool?", clientID)
+		//scg.cleanupConnPool(clientConnPool)
 	}
 }
 
-func (scg *ServerConnectionGroup) handleConnection(conn net.Conn, connPool *ClientConnectionPool) {
+func (scg *ServerConnectionGroup) handleConnection(conn net.Conn, connPool *ClientConnectionPool, req *HandshakeRequest) {
 	log.Printf("SERVER: handleConnection: Starting to process new connection from %s", conn.RemoteAddr().String())
 
 	for {
@@ -230,6 +242,7 @@ func (scg *ServerConnectionGroup) handleConnection(conn net.Conn, connPool *Clie
 				} else {
 					log.Printf("SERVER: handleConnection: Error reading request: %v", err)
 				}
+				scg.UnRegisterConnection(req.ClientID, conn)
 				return
 			}
 
