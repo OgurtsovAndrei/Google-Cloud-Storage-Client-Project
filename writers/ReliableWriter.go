@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"sync"
 	"time"
@@ -297,69 +298,94 @@ func (rw *ReliableWriterImpl) handleWriteEvents(ctx context.Context) (isFinished
 
 func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf *ScatterGatherBuffer, chunkBegin, chunkEnd int64, isLast bool) (int64, error) {
 	var totalWritten int64 = 0
+	actualRetries := 0
 
-	// deep copy the buffer for retries
-	originalData := &ScatterGatherBuffer{
-		size: buf.size,
-	}
-	for i := 0; i < buf.buffer.Len(); i++ {
-		chunk := buf.buffer.At(i)
-		chunkCopy := make([]byte, len(chunk))
-		copy(chunkCopy, chunk)
-		originalData.buffer.PushBack(chunkCopy)
+	resumeOffset, err := rw.unreliableWriter.GetResumeOffset(ctx)
+	if err != nil {
+		isRetryable := retrier.IsRetryableError(err)
+		return 0, retrier.NewRetryableError(err, isRetryable, "get_resume_offset", 0)
 	}
 
-	err := retrier.RetryWithBackoff(ctx, "write_chunk", rw.retryConfig, func(attempt int) error {
-		remainingData := &ScatterGatherBuffer{
-			size: originalData.size,
+	if resumeOffset > chunkBegin {
+		if resumeOffset >= chunkEnd {
+			return chunkEnd - chunkBegin, nil
 		}
-		for i := 0; i < originalData.buffer.Len(); i++ {
-			chunk := originalData.buffer.At(i)
+		bytesToSkip := uint32(resumeOffset - chunkBegin)
+		buf.DropFirst(bytesToSkip)
+		totalWritten = resumeOffset - chunkBegin
+		chunkBegin = resumeOffset
+	}
+
+	for totalWritten < chunkEnd-chunkBegin {
+		remainingData := &ScatterGatherBuffer{
+			size: buf.size,
+		}
+		for i := 0; i < buf.buffer.Len(); i++ {
+			chunk := buf.buffer.At(i)
 			chunkCopy := make([]byte, len(chunk))
 			copy(chunkCopy, chunk)
 			remainingData.buffer.PushBack(chunkCopy)
 		}
 
-		if totalWritten > 0 {
-			remainingData.DropFirst(uint32(totalWritten))
-		}
+		currentBegin := chunkBegin + totalWritten
+		currentEnd := chunkEnd
 		reader := remainingData.GetPipeReader()
 
-		if attempt > 0 {
-			fmt.Printf("[Retry] 🔄 Attempt #%d for chunk [%d-%d]\n", attempt+1, chunkBegin+totalWritten, chunkEnd)
-		}
-
-		written, err := rw.unreliableWriter.WriteAt(ctx, chunkBegin+totalWritten, chunkEnd, reader, isLast)
+		written, err := rw.unreliableWriter.WriteAt(ctx, currentBegin, currentEnd, reader, isLast)
 		if err != nil {
-			fmt.Printf("[Retry] ❌ Failed attempt #%d: %v\n", attempt+1, err)
+			var retryErr *retrier.RetryableError
+			if !errors.As(err, &retryErr) {
+				isRetryable := retrier.IsRetryableError(err)
+				err = retrier.NewRetryableError(err, isRetryable, "write_chunk", actualRetries)
+				retryErr = err.(*retrier.RetryableError)
+			}
 
-			shouldRetry := retrier.IsRetryableError(err)
-			return retrier.NewRetryableError(err, shouldRetry, "write_chunk", attempt)
+			if !retryErr.Retriable {
+				return totalWritten, err
+			}
+
+			actualRetries++
+			fmt.Printf("[Retry] ❌ Actual retry #%d: %v\n", actualRetries, err)
+
+			if actualRetries >= rw.retryConfig.MaxRetries {
+				return totalWritten, fmt.Errorf("exceeded maximum retries (%d)", rw.retryConfig.MaxRetries)
+			}
+
+			resumeOffset, resumeErr := rw.unreliableWriter.GetResumeOffset(ctx)
+			if resumeErr != nil {
+				fmt.Printf("[Warning] Failed to get resume offset: %v\n", resumeErr)
+				if written > 0 {
+					totalWritten += written
+					buf.DropFirst(uint32(written))
+				}
+			} else {
+				if resumeOffset > currentBegin {
+					bytesWritten := resumeOffset - currentBegin
+					totalWritten += bytesWritten
+					buf.DropFirst(uint32(bytesWritten))
+				}
+			}
+
+			backoff := time.Duration(float64(rw.retryConfig.InitialInterval) *
+				math.Pow(rw.retryConfig.Multiplier, float64(actualRetries-1)))
+			if backoff > rw.retryConfig.MaxInterval {
+				backoff = rw.retryConfig.MaxInterval
+			}
+
+			select {
+			case <-ctx.Done():
+				return totalWritten, ctx.Err()
+			case <-time.After(backoff):
+				continue
+			}
 		}
 
 		totalWritten += written
 		buf.DropFirst(uint32(written))
 
 		if totalWritten < chunkEnd-chunkBegin {
-			fmt.Printf("[Retry] ⚠️ Partial write in attempt #%d: %d/%d bytes\n",
-				attempt+1, totalWritten, chunkEnd-chunkBegin)
-			return retrier.NewRetryableError(
-				fmt.Errorf("partial write: %d/%d bytes", totalWritten, chunkEnd-chunkBegin),
-				true,
-				"write_chunk",
-				attempt,
-			)
+			continue
 		}
-
-		if attempt > 0 {
-			fmt.Printf("[Retry] ✅ Success on attempt #%d\n", attempt+1)
-		}
-		return nil
-	})
-
-	if err != nil {
-		fmt.Printf("[Retry] 🛑 Error after all retries: %v\n", err)
-		return totalWritten, err
 	}
 
 	return totalWritten, nil

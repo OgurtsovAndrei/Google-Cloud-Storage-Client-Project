@@ -155,7 +155,7 @@ func handleConnection(ctx context.Context, conn net.Conn, uploadSessions *map[st
 func createNewSession(ctx context.Context, uploadSessionsMutex *sync.Mutex, bucketName string, objectName string, uploadSessions *map[string]*UploadSession, sessionKey string) (*UploadSession, bool) {
 	sessionCtx, cancelFunc := context.WithTimeout(context.Background(), time.Hour)
 
-	gcsClient, err := utils.NewGcsClient(sessionCtx)
+	gcsClient, err := utils.NewGcsClient(sessionCtx, nil)
 	if err != nil {
 		uploadSessionsMutex.Unlock()
 		fmt.Printf("Failed to create GCS client: %v\n", err)

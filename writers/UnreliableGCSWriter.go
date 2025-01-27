@@ -3,7 +3,6 @@ package writers
 import (
 	"awesomeProject/retrier"
 	"awesomeProject/utils"
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -21,7 +20,7 @@ type UnreliableGCSWriter struct {
 	writeHook func(data []byte, offset int64)
 }
 
-func NewUnreliableGCSWriter(ctx context.Context, bucket, objectName string, injector utils.ErrorInjector) (*UnreliableGCSWriter, error) {
+func NewUnreliableGCSWriter(ctx context.Context, bucket, objectName string, injector *utils.NetworkFaultInjector) (*UnreliableGCSWriter, error) {
 	gcsClient, err := utils.NewGcsClient(ctx, injector)
 	if err != nil {
 		return nil, err
@@ -45,6 +44,20 @@ func (ugw *UnreliableGCSWriter) WriteAt(ctx context.Context, chunkBegin, chunkEn
 		return 0, &retrier.GCSError{Code: 499, Message: "operation aborted"}
 	}
 
+	const MinUploadChunkSize = 256 * 1024
+
+	currentOffset, complete, err := ugw.gcsClient.GetResumeOffset(ctx, ugw.uploadUrl)
+	if err != nil {
+		isRetryable := retrier.IsRetryableError(err)
+		return 0, retrier.NewRetryableError(err, isRetryable, "get_resume_offset", 0)
+	}
+	if complete {
+		ugw.resumeOff = currentOffset
+		return 0, nil
+	}
+
+	ugw.resumeOff = currentOffset
+
 	if chunkBegin != ugw.resumeOff {
 		return 0, &retrier.GCSError{
 			Code:    400,
@@ -54,19 +67,47 @@ func (ugw *UnreliableGCSWriter) WriteAt(ctx context.Context, chunkBegin, chunkEn
 
 	size := chunkEnd - chunkBegin
 
-	// for testing: if we have a hook, read the data and call the hook
-	if ugw.writeHook != nil {
-		data, err := io.ReadAll(reader)
-		if err != nil {
-			return 0, err
+	if !isLast {
+		// align the offset to nearest MinUploadChunkSize boundary
+		alignedBegin := (chunkBegin + MinUploadChunkSize - 1) / MinUploadChunkSize * MinUploadChunkSize
+
+		if chunkBegin < alignedBegin {
+			skipBytes := alignedBegin - chunkBegin
+			if skipBytes > size {
+				skipBytes = size
+			}
+			skipBuf := make([]byte, skipBytes)
+			n, err := io.ReadFull(reader, skipBuf)
+			if err != nil {
+				return int64(n), err
+			}
+			ugw.resumeOff += int64(n)
+			return int64(n), nil
 		}
-		ugw.writeHook(data, chunkBegin)
-		reader = bytes.NewReader(data)
+
+		remainingSize := chunkEnd - alignedBegin
+		alignedSize := (remainingSize / MinUploadChunkSize) * MinUploadChunkSize
+		if alignedSize == 0 {
+			return 0, nil
+		}
+		chunkEnd = alignedBegin + alignedSize
+		size = chunkEnd - chunkBegin
 	}
 
-	err := ugw.gcsClient.UploadObjectPart(ctx, ugw.uploadUrl, chunkBegin, reader, size, isLast)
+	written, err := ugw.gcsClient.UploadObjectPart(ctx, ugw.uploadUrl, chunkBegin, reader, size, isLast)
 	if err != nil {
-		return 0, err
+		isRetryable := retrier.IsRetryableError(err)
+		currentOffset, _, offsetErr := ugw.gcsClient.GetResumeOffset(ctx, ugw.uploadUrl)
+		if offsetErr == nil {
+			written = currentOffset - chunkBegin
+			if written < 0 {
+				written = 0
+			}
+			ugw.resumeOff = currentOffset
+		} else if written > 0 {
+			ugw.resumeOff = chunkBegin + written
+		}
+		return written, retrier.NewRetryableError(err, isRetryable, "upload_part", 0)
 	}
 
 	ugw.resumeOff = chunkEnd

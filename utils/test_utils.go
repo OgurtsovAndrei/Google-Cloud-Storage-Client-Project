@@ -3,10 +3,7 @@ package utils
 import (
 	"cloud.google.com/go/storage"
 	"context"
-	"crypto/tls"
-	"fmt"
 	"github.com/schollz/progressbar/v3"
-	"golang.org/x/net/http2"
 	"io"
 	"math/rand"
 	"net"
@@ -72,56 +69,35 @@ func VerifyChunkPositions(t *testing.T, data []byte) {
 	}
 }
 
+type ErrorInjector interface {
+	ShouldInjectError() bool
+	GetError() error
+}
+
 type NetworkFaultInjector struct {
-	faultRatio    float64
-	faults        []error
-	rnd           *rand.Rand
-	injectedCount int
-	injectedMap   map[string]bool // Track which errors were injected
+	FaultRatio float64
+	Errors     []error
+	rnd        *rand.Rand
 }
 
-func NewNetworkFaultInjector(faultRatio float64, faults []error) *NetworkFaultInjector {
+func NewNetworkFaultInjector(faultRatio float64, errors []error) *NetworkFaultInjector {
 	return &NetworkFaultInjector{
-		faultRatio:  faultRatio,
-		faults:      faults,
-		rnd:         rand.New(rand.NewSource(time.Now().UnixNano())),
-		injectedMap: make(map[string]bool),
+		FaultRatio: faultRatio,
+		Errors:     errors,
+		rnd:        rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
-}
-
-func (n *NetworkFaultInjector) AllErrorsInjected() bool {
-	return len(n.injectedMap) == len(n.faults)
 }
 
 func (n *NetworkFaultInjector) ShouldInjectError() bool {
-	shouldInject := n.rnd.Float64() < n.faultRatio
-	if shouldInject {
-		n.injectedCount++
-		fmt.Printf("\n[Fault Injector] 💉 Injecting error #%d\n", n.injectedCount)
+	if n.rnd == nil {
+		n.rnd = rand.New(rand.NewSource(time.Now().UnixNano()))
 	}
-	return shouldInject
+	return n.rnd.Float64() < n.FaultRatio
 }
 
 func (n *NetworkFaultInjector) GetError() error {
-	// If not all errors injected, prioritize uninjected ones
-	if !n.AllErrorsInjected() {
-		// Get uninjected errors
-		var uninjected []error
-		for _, err := range n.faults {
-			if !n.injectedMap[fmt.Sprintf("%T:%v", err, err)] {
-				uninjected = append(uninjected, err)
-			}
-		}
-		err := uninjected[n.rnd.Intn(len(uninjected))]
-		n.injectedMap[fmt.Sprintf("%T:%v", err, err)] = true
-		fmt.Printf("[Fault Injector] Generated new error: %v\n", err)
-		return err
-	}
-
-	// All errors injected at least once, random selection
-	err := n.faults[n.rnd.Intn(len(n.faults))]
-	fmt.Printf("[Fault Injector] Generated repeated error: %v\n", err)
-	return err
+	println("selecting error")
+	return n.Errors[n.rnd.Intn(len(n.Errors))]
 }
 
 func DownloadFromGCS(ctx context.Context, bucket, object string) ([]byte, error) {
@@ -142,41 +118,13 @@ func DownloadFromGCS(ctx context.Context, bucket, object string) ([]byte, error)
 	return io.ReadAll(pr)
 }
 
-var NetworkErrors = []error{
-	// TLS errors
-	tls.AlertError(20), //alertBadRecordMAC
-	tls.AlertError(10), //alertUnexpectedMessage
-	tls.AlertError(40), //alertHandshakeFailure
-	tls.AlertError(80), //alertInternalError
-	tls.AlertError(70), //alertProtocolVersion
-	tls.AlertError(71), //alertInsufficientSecurity
-	tls.AlertError(50), //alertDecodeError
-	tls.AlertError(22), //alertRecordOverflow
-
-	// HTTP/2 errors
-	&http2.GoAwayError{LastStreamID: 1, ErrCode: http2.ErrCodeProtocol},        // protocol errors
-	&http2.GoAwayError{LastStreamID: 1, ErrCode: http2.ErrCodeInternal},        // server internal errors
-	&http2.GoAwayError{LastStreamID: 1, ErrCode: http2.ErrCodeFlowControl},     // flow control issues
-	&http2.GoAwayError{LastStreamID: 1, ErrCode: http2.ErrCodeSettingsTimeout}, // timeout on settings
-	&http2.GoAwayError{LastStreamID: 1, ErrCode: http2.ErrCodeEnhanceYourCalm}, // server asking to slow down
-	&http2.GoAwayError{LastStreamID: 1, ErrCode: http2.ErrCodeConnect},         // connection issues
-
-	// Same codes for StreamError
-	&http2.StreamError{StreamID: 1, Code: http2.ErrCodeProtocol},
-	&http2.StreamError{StreamID: 1, Code: http2.ErrCodeInternal},
-	&http2.StreamError{StreamID: 1, Code: http2.ErrCodeFlowControl},
-	&http2.StreamError{StreamID: 1, Code: http2.ErrCodeSettingsTimeout},
-	&http2.StreamError{StreamID: 1, Code: http2.ErrCodeEnhanceYourCalm},
-	&http2.StreamError{StreamID: 1, Code: http2.ErrCodeConnect},
-
-	// DNS errors
-	&net.DNSError{Err: "timeout", IsTimeout: true, IsTemporary: true},
-	&net.DNSError{Err: "temporary failure", IsTimeout: false, IsTemporary: true},
-
-	// Network operation errors
-	&net.OpError{Op: "write", Err: &os.SyscallError{Syscall: "write", Err: syscall.ECONNRESET}},
-	&net.OpError{Op: "read", Err: &os.SyscallError{Syscall: "read", Err: syscall.ETIMEDOUT}},
-	&net.OpError{Op: "write", Err: &os.SyscallError{Syscall: "write", Err: syscall.EPIPE}},
-	&net.OpError{Op: "connect", Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}},
-	&net.OpError{Op: "dial", Err: &net.DNSError{Err: "lookup failed", IsTimeout: true}},
-}
+var (
+	TemporaryNetworkErrors = []error{
+		&net.OpError{Op: "write", Err: syscall.ECONNRESET},
+		&net.OpError{Op: "read", Err: syscall.ECONNRESET},
+		&net.OpError{Op: "write", Err: &os.SyscallError{Syscall: "write", Err: syscall.ETIMEDOUT}},
+		&net.OpError{Op: "read", Err: &os.SyscallError{Syscall: "read", Err: syscall.ETIMEDOUT}},
+		&net.OpError{Op: "connect", Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}},
+		&net.OpError{Op: "write", Err: &os.SyscallError{Syscall: "write", Err: syscall.EPIPE}},
+	}
+)
