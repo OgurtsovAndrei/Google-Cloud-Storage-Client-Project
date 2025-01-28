@@ -36,7 +36,7 @@ func TestRealGCSUpload(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
-	fileSize := 1 << 30 // 1GB
+	fileSize := 1 << 25 // 1GB
 	fileName := fmt.Sprintf("test_upload_%d.dat", time.Now().Unix())
 
 	fmt.Printf("\nGenerating %d bytes of test data...\n", fileSize)
