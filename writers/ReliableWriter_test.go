@@ -3,10 +3,12 @@ package writers
 import (
 	"awesomeProject/retrier"
 	"awesomeProject/utils"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"github.com/schollz/progressbar/v3"
 	"golang.org/x/net/http2"
@@ -194,5 +196,79 @@ func TestIsRetryableError(t *testing.T) {
 					tc.err, result, tc.shouldRetry, tc.err)
 			}
 		})
+	}
+}
+
+func TestUnreliableGCSWriterOffsetMismatch(t *testing.T) {
+	ctx := context.Background()
+	bucket := "another-eu-1-reg-bucket-finland-es"
+	fileName := fmt.Sprintf("test_upload_%d.dat", time.Now().Unix())
+
+	writer, err := NewUnreliableGCSWriter(ctx, bucket, fileName, nil)
+	if err != nil {
+		t.Fatalf("Failed to create writer: %v", err)
+	}
+
+	writer.resumeOff = 1000
+	data := []byte("test data")
+	reader := bytes.NewReader(data)
+
+	written, err := writer.WriteAt(ctx, 0, int64(len(data)), reader, false)
+
+	if written != 0 {
+		t.Errorf("expected 0 but got %d", written)
+	}
+
+	var retryErr *retrier.RetryableError
+	if !errors.As(err, &retryErr) {
+		t.Fatal("expected RetryableError")
+	}
+
+	if !retryErr.Retriable {
+		t.Error("expected offset mismatch error to be retryable")
+	}
+
+	var gcsErr *retrier.GCSError
+	if !errors.As(retryErr.Err, &gcsErr) {
+		t.Fatal("expected GCSError inside RetryableError")
+	}
+
+	if gcsErr.Code != 400 {
+		t.Errorf("expected error code 400, got %d", gcsErr.Code)
+	}
+}
+
+func TestUnreliableGCSWriterAborted(t *testing.T) {
+	ctx := context.Background()
+	bucket := "another-eu-1-reg-bucket-finland-es"
+	fileName := fmt.Sprintf("test_upload_%d.dat", time.Now().Unix())
+
+	writer, err := NewUnreliableGCSWriter(ctx, bucket, fileName, nil)
+	if err != nil {
+		t.Fatalf("Failed to create writer: %v", err)
+	}
+
+	writer.isAborted = true
+	data := []byte("test data")
+	reader := bytes.NewReader(data)
+
+	written, err := writer.WriteAt(ctx, 0, int64(len(data)), reader, false)
+
+	if written != 0 {
+		t.Errorf("expected 0 but got %d", written)
+	}
+
+	var retryErr *retrier.RetryableError
+	if !errors.As(err, &retryErr) {
+		t.Fatal("expected RetryableError")
+	}
+
+	var gcsErr *retrier.GCSError
+	if !errors.As(retryErr.Err, &gcsErr) {
+		t.Fatal("expected GCSError")
+	}
+
+	if gcsErr.Code != 499 {
+		t.Errorf("expected error code 499, got %d", gcsErr.Code)
 	}
 }

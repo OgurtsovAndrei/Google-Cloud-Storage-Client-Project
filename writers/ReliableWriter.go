@@ -300,22 +300,6 @@ func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf *
 	var totalWritten int64 = 0
 	actualRetries := 0
 
-	resumeOffset, err := rw.unreliableWriter.GetResumeOffset(ctx)
-	if err != nil {
-		isRetryable := retrier.IsRetryableError(err)
-		return 0, retrier.NewRetryableError(err, isRetryable, "get_resume_offset", 0)
-	}
-
-	if resumeOffset > chunkBegin {
-		if resumeOffset >= chunkEnd {
-			return chunkEnd - chunkBegin, nil
-		}
-		bytesToSkip := uint32(resumeOffset - chunkBegin)
-		buf.DropFirst(bytesToSkip)
-		totalWritten = resumeOffset - chunkBegin
-		chunkBegin = resumeOffset
-	}
-
 	for totalWritten < chunkEnd-chunkBegin {
 		remainingData := &ScatterGatherBuffer{
 			size: buf.size,
@@ -333,14 +317,7 @@ func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf *
 
 		written, err := rw.unreliableWriter.WriteAt(ctx, currentBegin, currentEnd, reader, isLast)
 		if err != nil {
-			var retryErr *retrier.RetryableError
-			if !errors.As(err, &retryErr) {
-				isRetryable := retrier.IsRetryableError(err)
-				err = retrier.NewRetryableError(err, isRetryable, "write_chunk", actualRetries)
-				retryErr = err.(*retrier.RetryableError)
-			}
-
-			if !retryErr.Retriable {
+			if !retrier.IsRetryableError(err) {
 				return totalWritten, err
 			}
 
@@ -351,19 +328,16 @@ func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf *
 				return totalWritten, fmt.Errorf("exceeded maximum retries (%d)", rw.retryConfig.MaxRetries)
 			}
 
-			resumeOffset, resumeErr := rw.unreliableWriter.GetResumeOffset(ctx)
-			if resumeErr != nil {
-				fmt.Printf("[Warning] Failed to get resume offset: %v\n", resumeErr)
-				if written > 0 {
-					totalWritten += written
-					buf.DropFirst(uint32(written))
+			if written == 0 {
+				resumeOffset, err := rw.unreliableWriter.GetResumeOffset(ctx)
+				if err == nil && resumeOffset > currentBegin {
+					written = resumeOffset - currentBegin
 				}
-			} else {
-				if resumeOffset > currentBegin {
-					bytesWritten := resumeOffset - currentBegin
-					totalWritten += bytesWritten
-					buf.DropFirst(uint32(bytesWritten))
-				}
+			}
+
+			if written > 0 {
+				totalWritten += written
+				buf.DropFirst(uint32(written))
 			}
 
 			backoff := time.Duration(float64(rw.retryConfig.InitialInterval) *
@@ -382,10 +356,6 @@ func (rw *ReliableWriterImpl) attemptWriteWithRetries(ctx context.Context, buf *
 
 		totalWritten += written
 		buf.DropFirst(uint32(written))
-
-		if totalWritten < chunkEnd-chunkBegin {
-			continue
-		}
 	}
 
 	return totalWritten, nil
